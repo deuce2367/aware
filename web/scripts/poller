@@ -1,0 +1,316 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------------------------
+# poller This shell script takes care of pinging nodes to help ensure availability
+#
+# chkconfig: 2345 85 25 
+# description: poller pings
+#
+#
+# $RCSfile: poller,v $
+# $Revision: 1.15 $
+# $Date: 2007-10-06 15:50:58 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+#-----------------------------------------------------------------------------------------------------------------
+
+use strict;
+use DBI;
+use POSIX;
+use Net::Ping;
+use Time::Local;
+use Time::HiRes qw(usleep gettimeofday tv_interval);
+use ZUtils::Common;
+use ZUtils::Aware;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+
+load_config("/etc/aware/aware.cfg");
+
+# System Monitor Configuration
+my $systemMonitor = get_config("system_monitor") || 0;
+my $messageTmp = get_config("message_tmp") || "/var/www/html/aware/messages/tmp";
+my $messageDir = get_config("message_dir") || "/var/www/html/aware/messages";
+
+#-------------------------------------------------------------------------------------------------------------------
+# Feel free to edit these if you know what you are doing...
+#-------------------------------------------------------------------------------------------------------------------
+
+# name - the name of this process 
+my $NAME = "poller";
+my $PIDFILE = "/var/run/$NAME.pid";
+my $componentName = "poller";
+my $subsystemName = "software";
+
+# sleep time - how long to sleep between runs
+my $SLEEP = 45;
+
+# daemon mode (set to 0 for running in the foreground, non-zero to run as a daemon)
+my $DAEMON = 1;
+
+# Try to retrieve settings from config
+my $VERBOSITY = get_config("verbosity") || 1;
+my $retries = get_config("retries") || 9999;
+
+# Logging/PIDFILE Options
+set_config("daemon", $DAEMON);
+set_config("verbosity", $VERBOSITY);
+set_config("logfile", "/var/log/$NAME.log");
+set_config("pidfile", $PIDFILE);
+set_config("name", $NAME);
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Probably shouldn't need to edit beyond this point
+#-------------------------------------------------------------------------------------------------------------------
+
+# CVS Version
+my $VERSION = '$Revision: 1.15 $';
+$VERSION =~ s/^\$(.*)\s\$$/$1/g;
+
+# command line param
+my $USAGE = lc($ARGV[0]) || "";
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Initialization
+#-----------------------------------------------------------------------------------------------
+
+if ($USAGE ne "start" && $USAGE ne "stop" && $USAGE ne "restart" && $USAGE ne "status") {
+	print "\n\t$NAME ($VERSION)\n";
+	print "\t=============================\n\n";
+	
+	print "\tUsage: $NAME {start|stop|status|restart} [verbosity]\n\n";
+	exit(0);
+}
+
+
+if ($USAGE eq "stop") {
+	stop_daemon(get_config("pidfile"), $NAME);
+	exit(0);
+} elsif ($USAGE eq "restart") {
+	stop_daemon(get_config("pidfile"), $NAME);
+} elsif ($USAGE eq "status") {
+	print_status(get_config("pidfile"), $NAME);
+	exit(0);
+}
+
+my $hostid;
+my $dbh;
+
+# Handle these signals so we can exit gracefully
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+if ($DAEMON) {
+	# Fork child and exit from parent - i.e. launch the daemon
+	my $pid = fork;
+	exit if $pid;
+	die "Error forking process: $!" unless defined($pid);
+	setsid();
+
+	if (set_pid($NAME, $PIDFILE) != $$) {
+		print "$NAME is already running\n";
+		print_log("$NAME already active (check '$PIDFILE')", 2); 
+		exit;
+	}
+
+	print "$NAME started\n";
+
+	close(STDIN);
+	close(STDOUT);
+	close(STDERR);
+}
+
+print_log("-------$NAME initializing (VERBOSITY==$VERBOSITY, PID==$$)-------", 0);
+
+# Initialize fields
+$dbh = get_db_connection();
+while(!defined($dbh)) {
+	print_log("Error connecting to database", 0);
+	sleep($SLEEP);
+	$dbh = get_db_connection();
+}
+$dbh->do("update node set ping = 0 where ping is null");
+$dbh->do("update node set alert = 0 where alert is null");
+$dbh->disconnect();
+
+chomp(my $serial = `cat /etc/aware/hostid`);
+$serial =~ s/\s//g;
+
+#-------------------------------------------------------------------------------------------------------------------
+# Daemon/Script Loop
+#-------------------------------------------------------------------------------------------------------------------
+
+until ($time_to_die) {
+
+	print_log("Begin Polling Run", 1);
+
+	# open database connection, retry until successful
+	$dbh = get_db_connection();
+
+	while(!defined($dbh)) {
+		print_log("Error connecting to database", 0);
+		sleep(5);
+		$dbh = get_db_connection();
+	}
+
+	# obtain our hostid
+	my $sth = $dbh->prepare("select id from node where hostid like '$serial'");
+	if (!$sth->execute()) { print_log("Database Error: " . $dbh->errstr); }
+	my @row = $sth->fetchrow();
+	$hostid = $row[0];
+	$sth->finish();
+
+	# check our status
+	$sth = $dbh->prepare("select status, frequency from daemon_tasking where daemon = '$NAME'");
+	$sth->execute();
+	@row = $sth->fetchrow();
+	my $running = $row[0];
+	if (defined($row[1])) { $SLEEP = $row[1]; }
+
+	if (!$running && 0) {
+		my $sql = "replace into daemon (hostid, name, updated, status, version) values
+			($hostid, '$NAME', now(), 'stopped', '$VERSION')";
+		print_log($sql, 2);
+		$dbh->do($sql) || print_log("Database Error: " . $dbh->errstr, 0); 
+
+		$sth->finish();
+		$dbh->disconnect();
+
+		sleep($SLEEP);
+		next;
+	}
+
+
+	$dbh->do("replace into daemon (hostid, name, updated, status, version) values ($hostid, '$NAME', now(), 'running', '$VERSION')") ||
+		print_log("Database Error: " . $dbh->errstr, 0); 
+
+	# Now retrieve host list from the database.
+	my $sql = "SELECT hostname, id, poll, port FROM node order by idx, hostname";
+
+	$sth = $dbh->prepare($sql);
+	if (!$sth->execute()) { print_log("Database error retrieving host list: " . $dbh->errstr, 0); }
+
+	my $failed = 0;
+	my @failures = ();
+	my $count = 0;
+	my $ttime = 0;
+
+	while (my @row = $sth->fetchrow_array()) {
+		my $node 	= $row[0];
+		my $hostid 	= $row[1];
+		my $poll	= $row[2];
+		my $portStr     = $row[3] || "";
+		my @ports = split(/,/, $portStr);
+
+
+		foreach my $port (@ports) {
+
+			print_log(" - polling $node:$port", 2);
+
+			my ($proto, $port) = split(/:/, $port);
+			my $t0 = [gettimeofday];
+			my $success = 0;
+			my $socket = IO::Socket::INET->new(PeerAddr => $node, PeerPort => $port, 
+					Proto => "$proto", Timeout => 15);
+	
+			if ($socket) {
+				## -- try to trap any runtime socket errors
+				eval {
+					print $socket "AWARE/POLL\n\n";
+					$success = <$socket>;
+					close($socket);
+				};
+	
+				if ($@) {
+					$success = 0;
+					print_log("WARNING polling $node port $port: $@", 0);
+				}
+			}
+	
+			my $pollTime = tv_interval($t0, [gettimeofday]);
+			$ttime += $pollTime;
+			if(!$success) {
+				print_log("$proto port $port on $node is unavailable", 0);
+				$dbh -> do("update node set poll = poll + 1 where id = '$hostid'");
+				$dbh -> do("update node set alert = alert + 1 where id = '$hostid'");
+				$dbh -> do("replace into alert (hostid, type, updated, message) values ('$hostid', 'poll', now(),
+						'Unable to poll $proto port $port on $node')");
+				$failed++;
+				push(@failures, "$proto port $port on $node");
+			} else {
+				if ($poll) { 
+					print_log("$proto port $port on $node now available", 0);
+					$dbh -> do("update node set poll = 0 where id = '$hostid'"); 
+				}
+				$ttime += $pollTime;
+				$count++;
+			}
+		}
+
+	}
+
+	$sth->finish();
+	$dbh->disconnect();
+
+	if ($systemMonitor) {
+
+		print_log(" - generating system monitor update", 1);
+
+		my $average = sprintf("%.3f", $ttime / $count); 
+		my $message = "$count node(s) @ $average seconds/node";
+		my $status = "ok";
+		my $created = timelocal(gmtime());
+		my $interval = ($SLEEP + $ttime) * 2;
+
+		if ($#failures >= 0) {
+			$status =  "warning";
+			$message = "Failed Nodes:<br>";
+			foreach my $failure (@failures) {
+				$message .= "$failure<br>";
+			}
+		}
+
+		print_log($message, 2);
+
+		my $tmpfile = "$messageTmp/$subsystemName\_$componentName.$created";
+		my $outfile = "$messageDir/$subsystemName\_$componentName.$created";
+
+		if (open(OUT, ">$tmpfile")) {
+			print OUT "created=$created\n";
+			print OUT "component=$componentName\n";
+			print OUT "subsystem=$subsystemName\n";
+			print OUT "interval=$interval\n";
+			print OUT "status=$status\n";
+			print OUT "message=$message\n";
+			close(OUT);
+	
+			rename($tmpfile, $outfile);
+			my $localtime = from_unixtime($created);
+			print_log(" - wrote $outfile @ $localtime ($created)", 1);
+		} else {
+			print_log(" - error creating $outfile: $!", 0);
+		}
+
+
+	}
+
+	print_log("$NAME run complete", 1);
+
+	sleep($SLEEP);
+}
+
+clearPid();
+$dbh = get_db_connection();
+if (defined($dbh)) {
+	$dbh->do("replace into daemon (hostid, name, updated, status, version) values ($hostid, '$NAME', now(), 'shutdown signal received', '$VERSION')"); 
+	print_log("$NAME database status updated", 1);
+}
+$dbh->disconnect();
+print_log("$NAME shutdown complete", 0);
+
+

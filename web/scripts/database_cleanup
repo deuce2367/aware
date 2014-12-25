@@ -1,0 +1,324 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------
+# database_cleanup This shell script removes orphaned data from the AWARE database
+#-----------------------------------------------------------------------------------------------
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Sys::Hostname;
+use Socket;
+use ZUtils::Common;
+use ZUtils::Aware;
+use Data::Dumper;
+use Getopt::Long;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+load_config("/etc/aware/aware.cfg");
+
+#-----------------------------------------------------------------------------------------------
+# These variables MUST be set to appropriate local values!!!
+#-----------------------------------------------------------------------------------------------
+
+# Daemon settings
+my $NAME = "database_cleanup";
+my $DAEMON = 0;
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Settings (edit as appropriate)
+#-----------------------------------------------------------------------------------------------
+
+my $VERBOSITY = 1;
+my $COMMIT = 1;
+my $LIMIT = 5000;
+my $dbh;
+my $ORPHANS = 0;
+my $DEEPCLEAN = 0;
+my $REBUILD_INDEXES = 1;
+
+# -- determine if there were any optional usage parameters
+my %options = ();
+GetOptions(\%options, "help", "limit=s", "show", "verbosity=s");
+if (defined($options{help})) { print_usage(); }
+if (defined($options{show})) { $COMMIT = 0; }
+if (defined($options{verbosity})) { $VERBOSITY = $options{verbosity}; }
+if (defined($options{limit})) { $LIMIT = $options{limit}; }
+set_config("verbosity", $VERBOSITY);
+
+
+# Handle these signals so we can exit gracefully
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+print_log("-------$NAME initializing (debug level = $VERBOSITY, pid == $$)-------", 0);
+
+eval {
+
+    print_log("Starting $NAME", 2);
+
+    # -- get a database connection
+    $dbh = get_db_connection();
+
+    find_duplicate_nodes();
+
+    check_versions();
+
+    if ($DEEPCLEAN) { deep_clean(); }
+    if ($REBUILD_INDEXES) { rebuild_indexes(); }
+
+
+}; # END EVAL    
+
+if ($@) { print_log("ERROR occurred during execution: $@", 0); }
+
+
+$dbh->disconnect();
+print_log("$NAME shutdown complete", 0);
+exit();
+
+sub check_versions {
+
+    print_log(" ======== CHECKING CLIENT VERSIONS ========", 0);
+
+    $dbh->do("delete from daemon where hostid not in (select id from node)");
+
+    my $sql = "select distinct (replace(version, '.', '')) aware_version from daemon order by aware_version desc";
+    my $sth = $dbh->prepare($sql) || print_log("Error processing SQL ($sql): " . $dbh->errstr, 0);
+    $sth->execute() || print_log("Error executing SQL ($sql): " . $dbh->errstr, 0);
+
+    my $count = 0;
+    my @row = $sth->fetchrow();
+    my $latestVersion = $row[0] || 0;
+    $sth->fetchrow();
+    $sth->finish();
+
+    print_log(" - latest installed revision of AWARE: $latestVersion", 0);
+
+    $sql = "select node.hostname, node.id, daemon.version from node, daemon where name = 'aware_daemon' and node.id = daemon.hostid and daemon.version != '$latestVersion'";
+    my $isth = $dbh->prepare($sql) || print_log("Error processing SQL ($sql): " . $dbh->errstr, 0);
+    $isth->execute() || print_log("Error executing SQL ($sql): " . $dbh->errstr, 0);
+    while (my @irow = $isth->fetchrow()) {
+        print_log(" - $irow[0] (id==$irow[1]) is running old version of aware -> $irow[2]", 0);
+    }
+    $isth->finish();
+
+}
+
+
+sub rebuild_indexes {
+
+    print_log(" ======== CHECKING DATABASE TABLES ========", 0);
+
+    my $sql = "show tables";
+    my $sth = $dbh->prepare($sql) || print_log("Error processing SQL ($sql): " . $dbh->errstr, 0);
+    $sth->execute() || print_log("Error executing SQL ($sql): " . $dbh->errstr, 0);
+
+    
+    while (my @row = $sth->fetchrow()) {
+        
+        my $table = $row[0];
+        print_log("Found Table: $table", 0);
+        $sql = "show index from $table";
+
+        my $isth = $dbh->prepare($sql) || print_log("Error processing SQL ($sql): " . $dbh->errstr, 0);
+        $isth->execute() || print_log("Error executing SQL ($sql): " . $dbh->errstr, 0);
+        while (my @irow = $isth->fetchrow()) {
+            #foreach my $col (@irow) { print_log(" * $col", 0); }
+            if (!defined($irow[6])) {
+                print_log("  - found Index w/ NULL Cardinality ($irow[2])", 0);
+                $dbh->do("repair table $table") || print_log("Error repairing table '$table': " . $dbh->errstr, 0);
+                last;
+            }
+        }
+        $isth->finish();
+    
+    }
+    $sth->finish();
+
+
+}
+
+
+sub deep_clean {
+
+    print_log(" ======== REMOVING ORPHANED DATA ========", 0);
+
+    my %hostids;
+    find_orphaned_ids("filesystem", \%hostids, -1);
+    find_orphaned_ids("process", \%hostids, -1);
+    find_orphaned_ids("diskload_yearly", \%hostids, 0);
+    find_orphaned_ids("memory_yearly", \%hostids, 1);
+    find_orphaned_ids("netload_yearly", \%hostids, 2);
+    find_orphaned_ids("sensor_reading_yearly", \%hostids, 3);
+    find_orphaned_ids("sysload_yearly", \%hostids, 4);
+
+    my @tables = ('diskload', 'memory', 'netload', 'sensor_reading', 'sysload');
+    my @suffixes = ('', '_daily', '_weekly', '_monthly', '_yearly');
+    my $count = 0;
+    my $htotal = 0;
+    foreach my $hostid (keys(%hostids)) {
+        $count++;
+        print_log("======================================================", 1);
+        print_log("Handling Orphan HOSTID: $hostid ($count/$ORPHANS)", 1);
+
+        # -- purge the singleton filesystem table
+        $dbh->do("delete from filesystem where hostid = $hostid") || 
+            print_log("Unable to purge from filesystem table for node: $hostid");
+        print_log(" - purged filesystem table for HOSTID: $hostid", 1);
+
+        # -- purge the singleton filesystem table
+        $dbh->do("delete from process where hostid = $hostid") || 
+            print_log("Unable to purge from process table for node: $hostid");
+        print_log(" - purged process table for HOSTID: $hostid", 1);
+
+        # -- purge from RR tables
+        my $table = $tables[$hostids{$hostid}];
+        foreach my $suffix (@suffixes) {
+            my $currentTable = "$table$suffix";
+            print_log("Purging data from $currentTable for orphaned hostid: $hostid", 2);
+            $htotal += purge_orphaned_data($currentTable, $hostid, $LIMIT);
+        }
+        print_log("Finished Purging for Orphan HOSTID $hostid: $htotal total row(s) deleted ", 1);
+    }
+
+}
+
+
+
+# ---------------------------------------------------------------------------------------
+# purge_orphaned_data (table_name, hostid, maxrows)
+#
+# - given a table and hostid delete all matching data (maxrows at a time)
+#
+# - returns the number of rows deleted
+#
+# ---------------------------------------------------------------------------------------
+
+sub purge_orphaned_data {
+
+    my ($table, $hostid, $max) = @_;
+
+    my $mcount = 1;
+    my $mtotal = 0;
+
+    # Purge matching rows from the specified table for the specified hostid 
+    my $sql = "delete low_priority from $table where hostid = $hostid limit $max";
+    my $sth = $dbh->prepare($sql) || print_log("SQL Error ($sql): " . $dbh->errstr, 0);
+    print_log("   SQL: $sql", 2);
+
+    while ($COMMIT && $mcount) {
+        if (!$sth->execute()) {
+            print_log("Query Error ($sql): " . $dbh->errstr, 0);
+            $mcount = 0;
+        } else {
+            $mcount = $sth->rows();
+        }
+
+        # -- no more rows available to delete
+        if ($mcount =~ m/0E0/) { 
+            print_log(" - no matching row(s) found", 2);
+            $mcount = 0; 
+        } else {
+            print_log(" - deleted $mcount rows from $table for hostid==$hostid", 2);
+        }
+        $mtotal += $mcount;
+    }
+    $sth->finish();
+    print_log(" - purging complete for $table (hostid==$hostid): $mtotal row(s) deleted", 1);
+
+    return $mtotal;
+
+}
+
+
+
+# ---------------------------------------------------------------------------------------
+# find_orphaned_ids (table_name, hash_reference)
+#
+# - given a table, find hostid values in that table that are not valid hosts according
+#   to the node table
+#
+# ---------------------------------------------------------------------------------------
+
+sub find_orphaned_ids {
+
+    my ($table, $hashRef, $tableIndex) = @_;
+
+    print_log("Finding orphaned HOSTIDs in $table", 1);
+    
+    my $sql = "select distinct hostid from $table where hostid not in (select id from node)";
+    my $sth = $dbh->prepare($sql) || print_log("SQL Error ($sql): " . $dbh->errstr, 0);
+    $sth->execute() || print_log("Query Error ($sql): " . $dbh->errstr, 0);
+    while (my @row = $sth->fetchrow()) {
+        my $orphanedHostid = $row[0];
+        if (!defined(${$hashRef}{$orphanedHostid})) {
+            ${$hashRef}{$orphanedHostid} = $tableIndex;
+            print_log(" - found new orphaned hostid: $orphanedHostid", 1);
+            $ORPHANS++;
+        }
+    }
+    $sth->finish();
+
+}
+
+
+
+# ---------------------------------------------------------------------------------------
+# find_duplicate_nodes()
+#
+# - find entries in the node table that are duplicates (by hostname)
+#
+# ---------------------------------------------------------------------------------------
+
+sub find_duplicate_nodes {
+
+    print_log(" ======== FINDING DUPLICATE NODES ========", 0);
+    
+    my $sql = "select count(*), hostname, min(id) from node group by hostname";
+    my $sth = $dbh->prepare($sql) || print_log("SQL Error ($sql): " . $dbh->errstr, 0);
+    $sth->execute() || print_log("Query Error ($sql): " . $dbh->errstr, 0);
+
+    my $purgeHandle = $dbh->prepare("delete from node where hostname = ? and id > ?");
+    while (my @row = $sth->fetchrow()) {
+        my $count = $row[0];
+        my $hostname = $row[1];
+        my $minId = $row[2];
+        if ($count > 1) {
+            print_log("=====================================================================", 1);
+            print_log("$hostname found $count times: purging for id > $minId", 1);
+            $purgeHandle->execute($hostname, $minId);
+        }
+        
+    }
+    $sth->finish();
+    $purgeHandle->finish();
+
+}
+
+
+
+
+
+# ---------------------------------------------------------------------------------------
+# print_usage()
+#
+# - print usage syntax and then exit the program
+#
+# ---------------------------------------------------------------------------------------
+
+sub print_usage {
+
+    print "Usage: $NAME [options]\n\n";
+    print " --verbosity=<0|1|2>       run at this level of verbosity/logging\n";
+    print " --limit=<number>          delete this many rows at a time (default: 5000)\n";
+    print " --show                    do not delete anything, just show what would have been done\n";
+    print " --help                    print this menu\n";
+
+    print "\n\n";
+    exit();
+}

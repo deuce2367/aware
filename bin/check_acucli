@@ -1,0 +1,95 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+chomp(my $username = `whoami`);
+if ($username ne "root") {
+    print "SORRY -- you really need to be root to run this program!!\n";
+    exit();
+}
+
+my $warning_count = 0;
+my @warnings;
+
+my @controllers = `hpacucli controller all show`;
+
+foreach my $controller (@controllers) {
+
+	chomp($controller);
+	if (length($controller) < 10) { next; }
+
+	my $slot = $controller;
+	$slot =~ s/^.*Slot ([0-9a-zA-Z]*)\s*\(.*\)/$1/;
+
+	$controller =~ s/\s+in Slot.*//;
+
+
+	my @logicalVolumes = `hpacucli controller slot=$slot logicaldrive all show`;  
+
+	print "$controller:\n";
+
+	my @arrays;
+
+	foreach my $logicalVolume (@logicalVolumes) {
+
+		# -- remove newline and any preceding spaces
+		chomp($logicalVolume);
+		$logicalVolume =~ s/^\s+//g;
+
+		if ($logicalVolume =~ m/logical/) {
+
+			$logicalVolume =~ s/[()]//g;
+
+			$logicalVolume =~ s/\s+,/,/g;
+			$logicalVolume =~ s/,\s+/,/g;
+			my ($logicalStr, $type, $status) = split(/,/, $logicalVolume);
+			my ($label, $number, $size, $units) = split(/\s+/, $logicalStr);
+
+			if (lc($status) !~ /ok/) { 
+				push(@warnings, "Logical Volume '$logicalStr' on Controller '$slot' has status '$status'");
+				$warning_count++; 
+			}
+	
+			print "   - $logicalVolume\n";
+		} elsif ($logicalVolume =~ m/array/) {
+
+			my ($label, $array) = split(/\s+/, $logicalVolume);
+
+			my @disks = `hpacucli controller slot=$slot array $array physicaldrive all show`;
+
+			print " Array $array\n";
+			foreach my $disk (@disks) {
+
+				chomp($disk);
+				$disk =~ s/^\s+//g;
+
+				if ($disk =~ m/physicaldrive/) {
+
+					$disk =~ s/.*\(//g;
+					$disk =~ s/\).*//g;
+	
+					$disk =~ s/\s+,/,/g;
+					$disk =~ s/,\s+/,/g;
+	
+					my ($disk_address, $type, $size, $status) = split(/,/, $disk);
+					print " - $disk\n";
+	
+					if (lc($status) !~ /ok/) { 
+						push(@warnings, "Disk Drive '$disk_address' on Controller '$slot' has status '$status'");
+						$warning_count++; 
+					}
+				}
+
+			}
+
+
+		}
+	}
+
+}
+
+
+print "I found $warning_count warning(s)\n";
+foreach my $warning (@warnings) {
+	print " W:$warning\n";
+}

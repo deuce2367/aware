@@ -1,0 +1,221 @@
+/* ----------------------- 
+ * $RCSfile: purple.css,v $
+ * $Revision: 1.6 $ 
+ * $Date: 2006-03-26 20:12:30 $ 
+ * $Author: aps1 $ 
+ * $Name: not supported by cvs2svn $ 
+ * ----------------------- */
+
+
+/* ------------------------------------------- */
+/* Page Elements                               */
+/* ------------------------------------------- */
+
+body { 
+	font-family: Tahoma, Helvetica, Verdana, Terminal, sans-serif; 
+	font-size: 12px; 
+	/*background-image: url("images/tile1.jpg");*/ 
+	margin:0px; 
+	font-size: 11px; 
+	background-color: #aeb6f9; 
+}
+
+
+
+
+/* ------------------------------------------- */
+/* Table Elements                              */
+/* ------------------------------------------- */
+
+table {
+	font-size: 11px;
+	color: #1d1d24;
+	background-color: #505050;
+	border: solid 1px #333;
+	-moz-border-radius: 4px;
+}
+
+th { 
+	font-size:11px; 
+	text-align: center; 
+	background-color: #000; 
+	color:#535cd8; 
+	padding-left: 3px; 
+	padding-right: 3px; 
+	-moz-border-radius: 3px;
+}
+
+td { 
+    vertical-align: top;
+	text-align: center; 
+	padding-left: 3px; 
+	padding-right: 3px; 
+	color: #151515;
+}
+
+
+.even { padding-left:8px; padding-right:8px; padding-top:2px; padding-bottom:2px; 
+	font-size:11px; text-align: left; background-color: #aaaaff; color: #444; }
+
+.odd { padding-left:8px; padding-right:8px;padding-top:2px; padding-bottom:2px; 
+	font-size:11px; text-align: left; background-color: #cdcdff; color: #444}
+
+
+
+.label { font-size:11px; text-align: right; background-color: #bbb; color:#333; padding-left: 5px; padding-right: 5px; } 
+.header { font-size:11px; text-align: center; color: #000; background-color:#535cd8; padding-left: 5px; padding-right: 5px; }
+.header:link { color: #ccc; }
+.header:visited { color: #ccc; }
+.header:active { color: #ccc; }
+.header:hover { color: #fff; }
+.lheader { font-size:11px; text-align: center; color: #000; background-color:#535cd8; padding-left: 5px; 
+	padding-right: 5px; border: 1px solid #1d1d24; }
+.footer { font-size:11px; text-align: center; background-color: #222; color:#1d1d24; padding-left: 5px; 
+	padding-right: 5px; border: 1px solid #1d1d24; }
+
+.calday  { font-size:11px; text-align: center; background-color: #666; color:#1d1d24; padding-left: 5px; padding-right: 5px; width: 56px; }
+
+
+.sortFieldDesc { background-color: #242; background: url(images/up.png) no-repeat left; padding-left: 20px; }
+.sortFieldAsc { background-color: #242; background: url(images/down.png) no-repeat left; padding-left: 20px; }
+.StdField { background-color: #242; padding-left: 20px; background: url(images/field.png) no-repeat left; }
+
+
+.l { text-align: left; }
+.r { text-align: right; }
+.banner { text-align: center; }
+
+.hlc { color: #fff; border: 1px solid #0f0; text-align: center; }
+.lhl { color: #fff; border: 1px solid #0f0; text-align: left; }
+.rhl { color: #fff; border: 1px solid #0f0; text-align: right; }
+
+.empty { background-color:#000}
+.alert { color: #b00; padding: 3px; margin: 3px;  }
+.message { color: #f93; padding: 3px; margin: 3px;  }
+
+.tableheader { font-size:16px; background-image: url("images/pbar.png"); color:#9EB5E9; border-bottom: 2px solid #fff; }
+
+/* ------------------------------------------- */
+/* Link Elements                               */
+/* ------------------------------------------- */
+a { text-decoration: none; }
+a:link { color: #0000bf; }
+a:visited { color: #0000bf}
+a:active { color: #0000bf}
+a:hover { color: #b92; text-decoration: underline; }
+
+.sortCol:link { color: #fff; }
+.sortCol:visited { color: #fff; }
+.sortCol:active { color: #fff; }
+.sortCol:hover { color: #b92; text-decoration: underline; }
+
+
+/* ------------------------------------------- */
+/* Form Elements                               */
+/* ------------------------------------------- */
+
+.checkbox { background-color: #555; color: #1d1d24; margin-left: 5px; margin-right: 5px; }
+.button { font-size:11px; height: 20px; margin-left: 5px; margin-right: 5px; -moz-border-radius: 3px; }
+.button:hover { font-size:11px; height: 20px; margin-left: 5px; margin-right: 5px; background-color: #bbd; -moz-border-radius: 3px; }
+
+select { font-size: 11px; padding-left:2px; border-right:1px solid #222; border-bottom:1px solid #222;
+	border-top:1px solid #bbb; border-left:1px solid #bbb; background-color: #000; width: 120px;color: #ddd;
+	}
+
+.smselect { font-size: 11px; border-right:1px solid #222; border-bottom:1px solid #222; border-top:1px solid #bbb; 
+	border-left:1px solid #bbb; background-color: #000; width: 80px;color: #ddd; padding-left:2px;
+	}
+
+.medselect { font-size: 11px; border-right:1px solid #222; border-bottom:1px solid #222; border-top:1px solid #bbb; 
+	border-left:1px solid #bbb; background-color: #000; width: 100px;color: #ddd; padding-left:2px;
+	}
+
+.lgselect { font-size: 11px; border-right:1px solid #222; border-bottom:1px solid #222; border-top:1px solid #bbb; border-left:1px solid #bbb;
+	background-color: #000; width: 150px;color: #ddd; padding-left:2px;
+	}
+
+textarea { font-size: 11px; background-color: #123; width: 600px; height:300px;color: #ddd;
+	margin-left: 3px; margin-top: 3px; padding-left:2px; }
+.smallarea { font-size: 11px; background-color: #111; width: 500px; height:18px;color: #ddd;
+	margin-left: 3px; margin-top: 3px; padding-left:2px; }
+.medarea { font-size: 11px; background-color: #111; width: 500px; height:34px;color: #ddd;
+	margin-left: 3px; margin-top: 3px; padding-left:2px; }
+.largearea { font-size: 11px; background-color: #111; width: 500px; height:140px;color: #ddd;
+	margin-left: 3px; margin-top: 3px; padding-left:2px; }
+
+.file{ font-size: 11px;
+	border-right:1px solid #1d1d24; border-bottom:1px solid #1d1d24;
+	border-top:1px solid #999; border-left:1px solid #999;
+	background-color: #000; width: 150px; color: #ddd;
+	padding-left:4px;
+	}
+
+.hugetext 	{ font-size: 11px; background-color: #000; width: 200px; color: #ccc; padding: 2px; text-align: left; }
+.biggiesizetext	{ font-size: 11px; background-color: #000; width: 120px; color: #ccc; padding: 2px; text-align: right; }
+.supersizetext 	{ font-size: 11px; background-color: #000; width: 100px; color: #ccc; padding: 2px; text-align: right; }
+.largetext 	{ font-size: 11px; background-color: #000; width: 85px;  color: #ccc; padding: 2px; text-align: right; }
+.mediumtext 	{ font-size: 11px; background-color: #000; width: 70px;  color: #ccc; padding: 2px; text-align: right; }
+.smalltext	{ font-size: 11px; background-color: #000; width: 50px;  color: #ccc; padding: 2px; text-align: right; }
+.tinytext 	{ font-size: 11px; background-color: #000; width: 25px;  color: #ccc; padding: 2px; text-align: right; }
+
+
+
+/* ------------------------------------------- */
+/* Div Elements                                */
+/* ------------------------------------------- */
+
+#menu {
+	background-color: #ddd;
+	/*background-image: url("images/gtile.jpg");*/ 
+	margin-top: 0px;
+	border-bottom:1px solid #1d1d24;
+	text-align: left;
+	padding: 12px;
+
+}
+
+
+#menu a:link { 
+	color: #fff; 
+}
+
+#menu a:visited { 
+	color: #fff; 
+}
+
+#menu a:hover { 
+	color: #b92; 
+}
+
+#menu table { 
+	background-color: #777;
+	font-size: 12px;
+	border: solid 1px #000;
+}
+
+#menu td { text-align: left; padding-left: 12px; padding-right: 15px; color: #ccc; }
+
+#menu th { font-weight: bold; background: url(images/bbar.png); color:#535cd8; text-align: left; 
+	padding-left: 40px; padding-right: 20px; padding-bottom: 2px; border-top: 1px solid #fff;
+}
+
+
+#mainsection { 
+	background-color: #ddd;
+	/*background-image: url("images/gtile.jpg"); */
+	margin-top: 20px;
+	margin-bottom: 20px;
+	border-top:1px solid #1d1d24;
+	border-bottom:1px solid #1d1d24;
+	padding: 14px;
+}
+
+
+#popup { 
+	background-color: #ddd;
+	border-top:1px solid #1d1d24;
+	border-bottom:1px solid #1d1d24;
+	padding: 14px;
+	margin-top: 20px;
+}
+

@@ -1,0 +1,150 @@
+#!/usr/bin/perl -w
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Sys::Hostname;
+use Socket;
+use ZUtils::Common;
+use ZUtils::Aware;
+use Time::HiRes qw(sleep usleep ualarm gettimeofday tv_interval);
+use Getopt::Long;
+use strict;
+
+
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+load_config("/etc/aware/aware.cfg");
+my $NAME = "memory_watcher";
+
+
+#-----------------------------------------------------------------------------------------------
+# Ideally - one shouldn't need to edit anything after this point...
+#-----------------------------------------------------------------------------------------------
+my $DATE = get_date();
+chomp(my $HOST = `hostname`);
+
+#-----------------------------------------------------------------------------------------------
+# Handle these signals so we can exit gracefully
+#-----------------------------------------------------------------------------------------------
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = $SIG{USR1} = \&my_signal_handler;
+
+# -- Globals 
+my $WINDOW = 10;
+my $SAMPLES = 0;
+my $PLOT = 0;
+my $VERBOSITY = 1;
+my $SLEEP = 10;
+
+# -- determine if there were any optional usage parameters
+my %options = ();
+GetOptions(\%options, "help", "verbosity=s", "log=s", "window=s", "samples=s", "delay=s", "limit=s");
+if (defined($options{help})) { print_usage(); exit(0); }
+if (defined($options{verbosity})) { $VERBOSITY = $options{verbosity}; }
+if (defined($options{log})) { set_config("logfile", $options{log}); set_config("daemon", 1); }
+if (defined($options{window})) { $WINDOW = $options{window}; }
+if (defined($options{samples})) { $SAMPLES = $options{samples}; }
+if (defined($options{delay})) { $SLEEP = $options{delay}; }
+
+
+set_config("verbosity", $VERBOSITY);
+
+print_log("------------ $NAME initializing (pid = $$, debug level = $VERBOSITY) ------------", 1);
+print_log(" - sampling window size: $WINDOW sec.", 1);
+if ($SAMPLES) { print_log(" - maximum # of samples: $SAMPLES sample(s)", 1); }
+
+
+my $old = $/;
+
+my %processes;
+my $count = 0;
+
+# -- the loop
+until ($time_to_die || ($SAMPLES && $count >= $SAMPLES)) {
+
+    if ($count) { sleep($SLEEP); }
+
+    my $cmd = "find /proc/ -maxdepth 1 -type d 2>/dev/null";
+    print_log(" - looking for processes: $cmd", 2);
+    my @procs = `$cmd`;
+
+    my %processes;
+    foreach my $processDir (@procs) {
+        
+        chomp($processDir);
+        if ($processDir =~ m/^\/proc\/[0-9]+$/) {
+            if (-e "$processDir/status") {
+                my %tokens;
+                my ($cmdline, $pid);
+               
+                open(STATUS, "<$processDir/status");
+                while(<STATUS>) {
+                    chomp($_);        
+                    my ($name, $value) = split(/:\s+/, $_);
+                    if (defined($name) && defined($value)) { 
+                        $tokens{$name} = $value; 
+                        if ($name =~ m/Name/) { $cmdline = $value; }
+                        if ($name =~ m/^Pid/) { $pid = $value; }
+                    }
+                }
+                close(STATUS);
+
+                print_log(" - adding monitor process: $processDir ($cmdline)", 2);
+                $processes{"$cmdline (PID==$pid)"} = \%tokens;
+            }
+        }
+    }
+    print_memory_usage(\%processes);
+    $count++;
+
+}
+
+
+sub print_memory_usage {
+
+    my ($hashRef) = @_;
+    my %processes = %{$hashRef};
+
+    print_log("==================================================================", 1);
+
+    foreach my $process (sort(keys(%processes))) { 
+        my $tokensRef = $processes{$process};
+        my %tokens = %{$tokensRef};
+        $process = rpad($process, 27);
+        if (defined($tokens{VmSize})) {
+            print_log("$process || VmSize==$tokens{VmSize}", 1); 
+        }
+    }
+
+}
+
+
+sub print_usage {
+
+    print "Usage: $NAME [options]\n\n";
+    print " --verbosity=<0|1|2>    run at this level of verbosity/logging\n";
+    print " --window <window>      use this sampling window size (seconds, fractional allowed, default==$WINDOW)\n";
+    print " --samples <samples>    exit after this many samples (default==$SAMPLES)\n";
+    print " --delay <delay>        sleep about this many seconds between runs (default==$SLEEP)\n";
+    print " --log <filename>       log the data in the specified file\n";
+
+    print "\n\n";
+    exit();
+}
+
+sub rpad {
+    my ($string, $length) = @_;
+    while(length($string) < $length) { $string .= " "; }
+    return $string;
+}
+
+
+sub my_signal_handler {
+    my ($sig) = @_;
+    print_log("Received Signal: $sig", 1);
+    $time_to_die++;
+    return;
+}

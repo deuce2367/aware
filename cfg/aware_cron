@@ -1,0 +1,1 @@
+15 0 * * * /opt/aware/web/scripts/archiver 1 2> /dev/null > /opt/aware/logs/archiver.log

@@ -1,0 +1,455 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------
+# consolidator - this command line (or daemon-based) tool will attempt to consolidate AWARE
+# statistics into daily, weekly, monthly and yearly tables for longer-term reporting and
+# plotting
+#
+# $RCSfile: consolidator,v $
+# $Revision: 1.14 $
+# $Date: 2008-05-05 20:52:30 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+#-----------------------------------------------------------------------------------------------
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Time::HiRes qw( gettimeofday tv_interval );
+use ZUtils::Common;
+use ZUtils::Aware;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+
+load_config("/etc/aware/aware.cfg");
+
+#-----------------------------------------------------------------------------------------------
+# These variables MUST be set to appropriate local values!!!
+#-----------------------------------------------------------------------------------------------
+
+# Daemon settings
+my $NAME = "consolidator";
+my $DAEMON = 1;
+
+# Try to retrieve settings from config
+my $VERBOSITY = get_config("verbosity") || 1;
+my $retries = get_config("retries") || 9999;
+
+# Logging/PIDFILE Options
+set_config("daemon", $DAEMON);
+set_config("verbosity", $VERBOSITY);
+set_config("logfile", "/opt/aware/logs/$NAME.log");
+set_config("pidfile", "/opt/aware/pids/$NAME.pid");
+set_config("name", $NAME);
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Settings (edit as appropriate)
+#-----------------------------------------------------------------------------------------------
+
+# -- these AWARE settings may be configured from the web interface
+my $HOSTIDFILE = "/etc/aware/hostid";
+my $SLEEP = 45;
+my $WINDOW = 10;
+my $LOGPROCS = 1;
+
+
+#-----------------------------------------------------------------------------------------------
+# Ideally - one shouldn't need to edit anything after this point...
+#-----------------------------------------------------------------------------------------------
+my $PIDFILE = get_config("pidfile");
+
+# CVS Version
+my $_version = '$Revision: 1.14 $';
+$_version =~ s/^\$(.*)\s\$$/$1/g;
+
+
+#-----------------------------------------------------------------------------------------------
+# Handle these signals so we can exit gracefully
+#-----------------------------------------------------------------------------------------------
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+my $target = "all";
+if (defined($ARGV[0])) {
+	## -- first argument is the target table(s)
+	chomp($ARGV[0]);
+	$target = $ARGV[0];
+}
+
+
+#-----------------------------------------------------------------------------------------------
+# Determine if we want to run in the foreground or background
+#-----------------------------------------------------------------------------------------------
+if ($DAEMON) {
+
+	# -- fork child and exit from parent
+	setsid();
+	my $pid = fork;
+	if ($pid) {
+		#$SIG{CHLD} = 'IGNORE';
+		exit();
+	}
+	die "Error forking process: $!" unless defined($pid);
+
+	if (set_pid($NAME, $PIDFILE) != $$) {
+		print "$NAME is already running\n";
+		print_log("$NAME already active (check '$PIDFILE')", 3); 
+		exit;
+	}
+
+	print "$NAME started\n";
+
+	# -- Important - helps prevent ssh/rsh hangs
+	close(STDIN);
+	close(STDOUT);
+	close(STDERR);
+}
+
+print_log("------------ $NAME initializing (pid = $$, debug level = $VERBOSITY) ------------", 0);
+
+until($time_to_die) {
+
+	my $startLoop = [gettimeofday];
+	my $dbh = get_db_connection($retries);
+	
+	my %fromTables = ( 5 => "", 30 => "_daily", 180 => "_weekly", 360 => "_monthly");
+	my %toTables = ( 5 => "_daily", 30 => "_weekly", 180 => "_monthly", 360 => "_yearly");
+	my @windowSizes = (5, 30, 180, 360);
+	my $initTime = unix_timestamp(get_date());
+	my $BASESIZE = 5;
+	my $SLEEP = $BASESIZE * 60;
+	my $BASETIME = from_unixtime($initTime - ($initTime % (60 * $BASESIZE)));
+	
+	
+	# -- get a list of nodes that we wish to report on
+	my $sql = "select a.id, a.hostname, b.name from node a 
+		left join profile b on a.profile_id = b.id
+		order by a.hostname";
+	
+	my $sth = $dbh->prepare($sql) || print_log("ERROR: " . $dbh->errstr, 0);
+	$sth->execute() || print_log("ERROR: " . $dbh->errstr); 
+	
+	my $rowcount = 0;
+	while (my @row = $sth->fetchrow()) {
+		$rowcount++;
+	
+		my $hostid = $row[0];
+		my $hostname = $row[1];
+		my $profile = $row[2];
+	
+		print_log("RRD statistics for #$rowcount $hostname ($hostid)", 1);
+	
+		foreach my $windowSize (@windowSizes) {
+	
+			my $toTime = $initTime - ($initTime % (60 * $windowSize));
+			print_log("- consolidating statistics by 1/$windowSize through " . from_unixtime($toTime) . "", 2);
+	
+			my $fromTable = $fromTables{$windowSize};
+			my $toTable = $toTables{$windowSize};
+	
+			if (lc($target) eq "sysload" || lc($target) eq "all") {
+				print_log("- consolidating sysload statistics (1/$windowSize)", 1);
+	
+				## -- consolidate Sysload statistics for each host
+				$sql = "select unix_timestamp(updated) from rrd where hostid = $hostid 
+                    and tablename = 'sysload$fromTable' and rrd = $windowSize";
+				my $sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				my @srow = $sysHandler->fetchrow();
+				my $fromTime = $toTime - 86400 * 7;
+				if (defined($srow[0])) { 
+					$fromTime = $srow[0]; 
+					$fromTime = $fromTime - ($fromTime % (60 * $windowSize));
+				}
+				$sysHandler->finish();
+				print_log("  sysload 1/$windowSize consolidation starting at " . from_unixtime($fromTime) . " on $hostname ($hostid)", 2);
+			
+				## -- iterate over the source rows, 1 window-size at a time
+				for (;$fromTime < $toTime; $fromTime += (60 * $windowSize)) {
+					my $fromDate = from_unixtime($fromTime);
+					my $toDate = from_unixtime($fromTime + ($windowSize * 60));
+					print_log("* RRD Sysload Stats for $hostname @ $fromDate to $toDate ", 3);
+			
+					## -- average the appropriate rows
+					$sql = "replace into sysload$toTable (hostid, updated, avg, procs, bi, bo, tx, rx, 
+						user, system, iowait, irq, softirq, idle, nice) values ('$hostid', '$toDate',
+						(select avg(avg) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(procs) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(bi) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(bo) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(tx) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(rx) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(user) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(system) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(iowait) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(irq) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(softirq) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(idle) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(nice) from sysload$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'))";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 3);
+			
+					## -- mark the averaged rows 
+					$sql = "update sysload$fromTable set rrd = 1 where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+					## -- log the consolidation high-water mark
+					$sql = "replace into rrd (hostid, rrd, updated, tablename) values ($hostid, $windowSize, '$toDate', 'sysload$fromTable')";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+				}
+				$dbh->commit();
+		
+			} 
+		
+			if (lc($target) eq "memory" || lc($target) eq "all") {
+
+				print_log("- consolidating memory statistics (1/$windowSize)", 1);
+		
+				## -- consolidate Memory statistics for each host
+				$sql = "select unix_timestamp(updated) from rrd where hostid = $hostid 
+                    and tablename = 'memory$fromTable' and rrd = $windowSize";
+				my $sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				my @srow = $sysHandler->fetchrow();
+				my $fromTime = $toTime - 86400 * 7;
+				if (defined($srow[0])) { 
+					$fromTime = $srow[0]; 
+					$fromTime = $fromTime - ($fromTime % (60 * $windowSize));
+				}
+				$sysHandler->finish();
+				print_log("  memory 1/$windowSize consolidation starting at " . from_unixtime($fromTime) . " on $hostname ($hostid)", 2);
+			
+				## -- iterate over the source rows, 1 window-size at a time
+				for (;$fromTime < $toTime; $fromTime += (60 * $windowSize)) {
+					my $fromDate = from_unixtime($fromTime);
+					my $toDate = from_unixtime($fromTime + ($windowSize * 60));
+					print_log("* RRD Memory Stats for $hostname @ $fromDate to $toDate ", 3);
+			
+					## -- average the appropriate rows
+					$sql = "replace into memory$toTable (hostid, updated, used, free, cached, buffers, usedSwap, freeSwap,
+						shmseg, shmsize, shmsem, committed_as) values ('$hostid', '$toDate',
+						(select avg(used) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(free) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(cached) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(buffers) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(usedSwap) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(freeSwap) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(shmseg) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(shmsize) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(shmsem) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(committed_as) from memory$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'))";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 3);
+			
+					## -- mark the averaged rows 
+					$sql = "update memory$fromTable set rrd = 1 where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+					## -- log the consolidation high-water mark
+                    $sql = "replace into rrd (hostid, rrd, updated, tablename) values ($hostid, $windowSize, '$toDate', 'memory$fromTable')";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+				}
+				$dbh->commit();
+		
+			} 
+		
+			if (lc($target) eq "temperature" || lc($target) eq "all") {
+
+				print_log("- consolidating temperature statistics (1/$windowSize)", 1);
+		
+				## -- consolidate Temperature statistics for each host
+				$sql = "select unix_timestamp(updated) from rrd where hostid = $hostid 
+                    and tablename = 'temperature$fromTable' and rrd = $windowSize";
+				my $sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				my @srow = $sysHandler->fetchrow();
+				my $fromTime = $toTime - 86400 * 7;
+				my $toDate = $BASETIME;
+				if (defined($srow[0])) { 
+					$fromTime = $srow[0]; 
+					$fromTime = $fromTime - ($fromTime % (60 * $windowSize));
+					$toDate = from_unixtime($fromTime);
+				}
+				$sysHandler->finish();
+				print_log("  temperature 1/$windowSize consolidation starting at " . from_unixtime($fromTime) . " on $hostname ($hostid)", 2);
+			
+				## -- iterate over the source rows, 1 window-size at a time
+				for (;$fromTime < $toTime; $fromTime += (60 * $windowSize)) {
+					my $fromDate = from_unixtime($fromTime);
+					my $toDate = from_unixtime($fromTime + ($windowSize * 60));
+					print_log("* RRD Temperature Stats for $hostname @ $fromDate to $toDate ", 3);
+			
+					## -- average the appropriate rows
+					$sql = "replace into temperature$toTable (hostid, updated, cpu0, cpu1, cpu2, cpu3, iozone, pzone) 
+                        values ('$hostid', '$toDate',
+						(select avg(cpu0) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(cpu1) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(cpu2) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(cpu3) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(iozone) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'), 
+						(select avg(pzone) from temperature$fromTable where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'))";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 3);
+			
+					## -- mark the averaged rows 
+					$sql = "update temperature$fromTable set rrd = 1 where hostid = $hostid and updated >= '$fromDate' and updated <= '$toDate'";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+					## -- log the consolidation high-water mark
+                    $sql = "replace into rrd (hostid, rrd, updated, tablename) values ($hostid, $windowSize, '$toDate', 'temperature$fromTable')";
+					$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+				}
+				$dbh->commit();
+		
+			} 
+		
+			if (lc($target) eq "diskload" || lc($target) eq "all") {
+
+				print_log("- consolidating diskload statistics (1/$windowSize)", 1);
+		
+				## -- consolidate Diskload statistics for each host
+				$sql = "select unix_timestamp(updated) from rrd where hostid = $hostid 
+                    and tablename = 'diskload$fromTable' and rrd = $windowSize";
+				my $sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				my @srow = $sysHandler->fetchrow();
+				my $fromTime = $toTime - 86400 * 7;
+				my $toDate = $BASETIME;
+				if (defined($srow[0])) { 
+					$fromTime = $srow[0]; 
+					$fromTime = $fromTime - ($fromTime % (60 * $windowSize));
+					$toDate = from_unixtime($fromTime);
+				}
+				$sysHandler->finish();
+				print_log("  diskload 1/$windowSize consolidation starting at " . from_unixtime($fromTime) . " on $hostname ($hostid)", 2);
+
+				## -- consolidate for each disk device on the host
+				$sql = "select distinct(device) from filesystem where hostid = $hostid";
+				$sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				while(my @srow = $sysHandler->fetchrow()) {
+					if (!defined($srow[0])) { next; }
+					my $device = $srow[0];
+					print_log("    - DISK DEVICE: $device", 3);
+			
+					## -- iterate over the source rows, 1 window-size at a time
+					for (my $fromTime = $fromTime; $fromTime < $toTime; $fromTime += (60 * $windowSize)) {
+						my $fromDate = from_unixtime($fromTime);
+						my $toDate = from_unixtime($fromTime + ($windowSize * 60));
+						print_log("* RRD Diskload Stats for $device on $hostname @ $fromDate to $toDate ", 3);
+				
+						## -- average the appropriate rows
+						$sql = "replace into diskload$toTable (hostid, updated, device, utilization, bi, bo) values ('$hostid', '$toDate', '$device',
+							(select avg(utilization) from diskload$fromTable where hostid = $hostid 
+								and device = '$device' and updated >= '$fromDate' and updated <= '$toDate'), 
+							(select avg(bi) from diskload$fromTable where hostid = $hostid 
+								and device = '$device' and updated >= '$fromDate' and updated <= '$toDate'), 
+							(select avg(bo) from diskload$fromTable where hostid = $hostid 
+								and device = '$device' and updated >= '$fromDate' and updated <= '$toDate'))";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 3);
+				
+						## -- mark the averaged rows 
+						$sql = "update diskload$fromTable set rrd = 1 where 
+							hostid = $hostid and device = '$device' and updated >= '$fromDate' and updated <= '$toDate'";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+						## -- log the consolidation high-water mark
+						$sql = "replace into rrd (hostid, rrd, updated, tablename) values ($hostid, $windowSize, '$toDate', 'diskload$fromTable')";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+					}
+				}
+				$sysHandler->finish();
+				$dbh->commit();
+		
+			}
+
+
+			if (lc($target) eq "netload" || lc($target) eq "all") {
+
+				print_log("- consolidating netload statistics (1/$windowSize)", 1);
+		
+				## -- consolidate Netload statistics for each host
+				$sql = "select unix_timestamp(updated) from rrd where hostid = $hostid 
+                    and tablename = 'netload$fromTable' and rrd = $windowSize";
+				my $sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				my @srow = $sysHandler->fetchrow();
+				my $fromTime = $toTime - 86400 * 7;
+				my $toDate = $BASETIME;
+				if (defined($srow[0])) { 
+					$fromTime = $srow[0]; 
+					$fromTime = $fromTime - ($fromTime % (60 * $windowSize));
+					$toDate = from_unixtime($fromTime);
+				}
+				$sysHandler->finish();
+				print_log("  netload 1/$windowSize consolidation starting at " . from_unixtime($fromTime) . " on $hostname ($hostid)", 2);
+
+				## -- consolidate for each net device on the host
+				$sql = "select device, vlan from nic where hostid = $hostid";
+				$sysHandler = $dbh->prepare($sql);
+				$sysHandler->execute();
+				while(my @srow = $sysHandler->fetchrow()) {
+					if (!defined($srow[0])) { next; }
+					my $device = $srow[0];
+					my $vlan = $srow[1];
+					print_log("    - NET DEVICE/VLAN: $device/$vlan: ", 3);
+			
+					## -- iterate over the source rows, 1 window-size at a time
+					for (my $fromTime = $fromTime; $fromTime < $toTime; $fromTime += (60 * $windowSize)) {
+						my $fromDate = from_unixtime($fromTime);
+						my $toDate = from_unixtime($fromTime + ($windowSize * 60));
+						print_log("* RRD Netload Stats for $device/$vlan on $hostname @ $fromDate to $toDate ", 3);
+				
+						## -- average the appropriate rows
+						$sql = "replace into netload$toTable (hostid, updated, device, vlan, tx, rx) 
+                            values ('$hostid', '$toDate', '$device', '$vlan',
+							(select avg(tx) from netload$fromTable where hostid = $hostid 
+								and device = '$device' and vlan = '$vlan' and updated >= '$fromDate' and updated <= '$toDate'), 
+							(select avg(tx) from netload$fromTable where hostid = $hostid 
+								and device = '$device' and vlan = '$vlan' and updated >= '$fromDate' and updated <= '$toDate'))";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 3);
+				
+						## -- mark the averaged rows 
+						$sql = "update netload$fromTable set rrd = 1 where 
+							hostid = $hostid and device = '$device' and vlan = '$vlan'
+                            and updated >= '$fromDate' and updated <= '$toDate'";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+
+						## -- log the consolidation high-water mark
+						$sql = "replace into rrd (hostid, rrd, updated, tablename) 
+                            values ($hostid, $windowSize, '$toDate', 'netload$fromTable')";
+						$dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+					}
+				}
+				$sysHandler->finish();
+				$dbh->commit();
+		
+			}
+	
+		}
+		
+	}
+	print_log("Statistics consolidated for $rowcount host(s)", 3);
+
+	# -- close out our database statement-handle and connection
+	$sth->finish();
+	$dbh->disconnect(); 
+
+	# -- sleep until it's time to run again (if we didn't finish on time just keep going)
+	my $loopTime = sprintf("%.2f", tv_interval($startLoop, [gettimeofday]));
+	print_log("Loop Completed in $loopTime s.", 1);
+	my $sleepTime = $SLEEP - ($loopTime);
+	if ($sleepTime > 0) {
+		print_log("Next Run in $sleepTime s.", 1);
+		sleep($sleepTime);
+	}
+
+}
+
+
+# -- finished
+print_log("$NAME complete", 0);
+exit();
+

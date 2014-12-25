@@ -1,0 +1,385 @@
+#!/usr/bin/perl -w
+
+# {DAEMON_NAME} This shell script takes care of starting and stopping the {DAEMON_NAME} daemon
+#
+# chkconfig: 2345 85 25 
+# description: {DAEMON_NAME} {DESCRIPTION} 
+#
+
+# ----------------------------
+# $RCSfile: daemon_skel,v $
+# $Revision: 1.5 $
+# $Date: 2007-10-06 15:50:58 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+# ----------------------------
+
+use strict;
+use DBI;
+use POSIX;
+use Time::Local;
+
+
+#######################################################################
+# These variables should be set to appropriate local values!
+#######################################################################
+
+# Database settings
+my $dbhost = "xxxx";
+my $dbname = "sysmon";
+my $dbuser = "sysmon";
+my $dbpass = "sysmon";
+
+#######################################################################
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Settings
+#-------------------------------------------------------------------------------------------------------------------
+
+# name - the name of this process 
+my $_name = "{DAEMON_NAME}";
+
+# pidfile - the file where we will store our pid
+my $_pidFile = "/var/run/$_name.pid";
+
+# sleep time in seconds - default value, controlled/configured via the web ifc
+my $_sleepTime = 45;
+
+# daemon mode (default)
+my $DAEMON = 1;
+
+# CVS Version
+my $version = '$Revision: 1.5 $';
+$version =~ s/^\$(.*)\s\$$/$1/g;
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Daemon Initialization
+#-------------------------------------------------------------------------------------------------------------------
+
+
+my $USAGE = lc($ARGV[0]) || "";
+my $VERBOSITY = $ARGV[1] || 0;
+
+
+if ($USAGE ne "start" && $USAGE ne "stop" && $USAGE ne "restart" && $USAGE ne "status") {
+	print "Usage: $_name {start|stop|status|restart} [verbosity]\n";
+	exit(0);
+}
+
+
+
+if ($USAGE eq "stop") {
+	stop_daemon();
+	exit(0);
+} elsif ($USAGE eq "restart") {
+	stop_daemon();
+} elsif ($USAGE eq "status") {
+	print_status();
+	exit(0);
+}
+
+
+# Handle these signals so we can exit gracefully
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+if ($DAEMON) {
+	# Fork child and exit from parent - i.e. launch the daemon
+	my $pid = fork;
+	exit if $pid;
+	die "Error forking process: $!" unless defined($pid);
+	setsid();
+
+	if (setPid() != $$) {
+		print "$_name already running\n";
+		printLog("$_name process already active (check '$_pidFile')", 2); 
+		exit;
+	}
+	print "$_name started\n";
+
+	close(STDIN);
+	close(STDOUT);
+	close(STDERR);
+}
+
+#-------------------------------------------------------------------------------------------------------------------
+# Main Daemon Body 
+#-------------------------------------------------------------------------------------------------------------------
+
+printLog("-------$_name initializing (debug level = $VERBOSITY)-------", 0);
+
+my $hostid;
+my $dbh;
+
+chomp(my $serial = `cat /etc/sysmon/hostid`);
+$serial =~ s/\s//g;
+
+until ($time_to_die) {
+
+	printLog("Starting $_name", 2);
+
+	# open database connection, retry until successful
+	$dbh = getDBConnection();
+
+	while(!defined($dbh)) {
+		printLog("Error connecting to database", 0);
+		sleep(5);
+		$dbh = getDBConnection();
+	}
+
+	# obtain local system hostid
+	my $sth = $dbh->prepare("select id from node where hostid like '$serial'");
+	if (!$sth->execute()) { printLog("Database Error: " . $dbh->errstr); }
+	my @row = $sth->fetchrow();
+	$hostid = $row[0];
+	$sth->finish();
+
+	# check our status
+	$sth = $dbh->prepare("select status, frequency from daemon_tasking where daemon = '$_name'");
+	$sth->execute();
+	@row = $sth->fetchrow();
+	my $running = $row[0];
+	if (defined($row[1])) { $_sleepTime = $row[1]; }
+
+	if (!$running) {
+		# if we've been turned off via web ifc -- do nothing 
+		my $sql = "replace into daemon (hostid, name, updated, status, version) values
+			($hostid, '$_name', now(), 'stopped', '$version')";
+		$dbh->do($sql) || printLog("Database Error: " . $dbh->errstr); 
+
+		$sth->finish();
+		$dbh->disconnect();
+
+		sleep($_sleepTime);
+		next;
+	}
+
+
+	$dbh->do("replace into daemon (hostid, name, updated, status, version) 
+		values ($hostid, '$_name', now(), 'running', '$version')") ||
+		printLog("Database Error: " . $dbh->errstr); 
+
+
+
+
+####### ---------------------------
+####### *** Daemon Payload Here ***
+####### ---------------------------
+
+
+
+
+
+
+	$sth->finish();
+	$dbh->disconnect();
+
+	printLog("$_name run complete", 1);
+
+	sleep($_sleepTime);
+}
+
+clearPid();
+$dbh = getDBConnection();
+if (defined($dbh)) {
+	$dbh->do("replace into daemon (hostid, name, updated, status, version) 
+		values ($hostid, '$_name', now(), 'shutdown signal received', '$version')"); 
+	printLog("$_name database status updated", 1);
+}
+$dbh->disconnect();
+printLog("$_name shutdown complete", 0);
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Subroutines 
+#-------------------------------------------------------------------------------------------------------------------
+
+# APS -  Consider moving these to vscommon??
+sub printLog {
+	my ($message, $level) = @_;
+
+	if ($level <= $VERBOSITY) {
+		open(LOG, ">>$_moLog");
+		my $time = gmtime();
+		print LOG "[$time] $message\n";
+		close(LOG);
+	}
+} 
+
+
+sub setPid {
+	my $curPid = $$;
+	my $running = 0;
+
+	# Basic Assumptions:
+	# IF
+	# - pid file exists
+	# - pid file is non-zero
+	# - pid file contains pid of process that matches name of process
+	# THEN
+	# - for our purposes the process is considered to be running 
+	if (-f $_pidFile && -s $_pidFile > 0) {
+		chomp($curPid = `cat $_pidFile`);
+		printLog("setPid: curPid = $curPid, my pid = $$", 2);
+		my @pids = `ps --no-headers -A -o "\%p \%c"`; 
+		foreach my $ps (@pids) {
+			chomp($ps);
+			$ps =~ s/^\s+//g;
+			my ($pid, $cmd) = split(/\s+/, $ps);
+			printLog("checking $pid $cmd ($ps)", 2);
+			if ($pid == $curPid && $cmd =~ m/$_name/) { $running = 1; last; }
+		}
+	} 
+	if (!$running) {
+		printLog("starting new $_name", 2);
+		$curPid = $$;
+		open(OUT, ">$_pidFile") || die "Cannot write '$_pidFile'";
+		print OUT $curPid;
+		close(OUT);
+		printLog("pid $curPid written to '$_pidFile'", 1);
+	}
+				
+	return $curPid ;
+
+}
+
+sub clearPid {
+	if (! -f $_pidFile) { return; }
+	chomp(my $curPid = `cat $_pidFile`);
+	printLog("my pid = $$, curPid = $curPid", 2);
+	if ($curPid eq $$) {
+		printLog("removing '$_pidFile'", 1);
+		system("/bin/rm $_pidFile");
+	}
+}
+
+sub signal_handler {
+	my ($sig) = @_;
+	$time_to_die = 1;
+	printLog("Alert: signal $sig received", 0);
+}
+
+
+sub stop_daemon {
+	my $running = 1;
+	my $attempts = 10;
+	my $sig = "-HUP";
+
+
+	if (-f $_pidFile && -s $_pidFile > 0) {
+		chomp(my $curPid = `cat $_pidFile`);
+
+		# We will try 9 times to kill the existing daemon process gracefully
+		# On the last attempt we will send a kill -9 just in case
+		while ($curPid && $running && $attempts > 0) {
+			if ($attempts == 1) { $sig = "-KILL"; }
+			$running = 0;
+			printLog("confirming $_name process: pid = $curPid", 1);
+			my @pids = `ps --no-headers -A -o "\%p \%c"`; 
+			foreach my $ps (@pids) {
+				chomp($ps);
+				$ps =~ s/^\s+//g;
+				my ($pid, $cmd) = split(/\s+/, $ps);
+				printLog("checking $pid $cmd ($ps)", 2);
+				if ($pid == $curPid && $cmd =~ m/$_name/) { 
+					printLog("killing process $pid -> $cmd", 1);
+					`kill $sig $curPid`;
+					sleep(2);
+					$running = 1;
+					$attempts--;
+					printLog("finished attempt - $attempts remain", 2);
+				}
+			}
+		}
+		printLog("$_name stopped per user request", 0);
+		print "$_name stopped\n";
+	}
+	if (-f $_pidFile) {
+		`/bin/rm $_pidFile`;		
+	}
+
+}
+
+
+sub print_status {
+	my $running = 0;
+	my $curPid;
+
+	if (-f $_pidFile && -s $_pidFile > 0) {
+		chomp($curPid = `cat $_pidFile`);
+		my @pids = `ps --no-headers -A -o "\%p \%c"`; 
+		foreach my $ps (@pids) {
+			chomp($ps);
+			$ps =~ s/^\s+//g;
+			my ($pid, $cmd) = split(/\s+/, $ps);
+			if (int($pid) == int($curPid) && $cmd =~ m/$_name/) { 
+				$running = 1;
+				last;
+			}
+		}
+	}
+
+	if ($running) {
+		print "$_name is running (pid = $curPid)\n";
+	} else {
+		print "$_name is not running\n";
+	}
+}
+
+
+sub getDBConnection {
+
+	my $dbh = DBI->connect("DBI:mysql:database=$dbname;host=$dbhost","$dbuser", "$dbpass", {
+		'RaiseError' => 0,
+		'PrintError' => 0,
+	});
+	return($dbh);
+}
+
+
+sub getNodes {
+
+	my ($rack, $type, $dbhost) = @_;
+
+	if (!$type) { $type = "node"; }
+	if (!$dbhost) { $dbhost = "default"; }
+
+	# Connect to the database.
+	my $dbh = getDBConnection($dbhost);
+
+	# Now retrieve data from the table.
+	my $sql = "SELECT hostname FROM node where ($rack) and profile like '$type' order by idx";
+
+	my $sth = $dbh->prepare($sql);
+	$sth->execute();
+
+	my @n;
+	while (my @row = $sth->fetchrow_array()) {
+		push(@n, $row[0]);
+
+	}
+
+	$sth->finish();
+	$dbh->disconnect();
+	return @n;
+}
+
+sub contains {
+	my ($arg, @arr)  = @_;
+	my $arg_canon = $arg;
+	$arg_canon =~ s/\..*//g;
+
+	foreach my $memb (@arr) {
+		my $memb_canon = $memb;
+		$memb_canon =~ s/\..*//g;
+		if ($memb_canon eq $arg_canon || $memb eq $arg) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+1;

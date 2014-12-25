@@ -1,0 +1,217 @@
+# ------------------------------------------------------------------------------------------
+# $Id: release_notes.txt,v 1.9 2008-04-09 18:17:39 aps1 Exp $
+# $RCSfile: release_notes.txt,v $
+# $Revision: 1.9 $
+# $Date: 2008-04-09 18:17:39 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+# ------------------------------------------------------------------------------------------
+
+
+AWARE System Monitor -- Revision History
+========================================
+
+Release_011 (April 2008)
+---------------------------
+
+	Notable New Features:
+
+		- REMINDER: MySQL 5.045 or higher now required to support round-robin features!!
+		- vsrsh & vscopy utilities have new profile actions (list profiles, members)
+
+	Improvements:
+
+		- graphics types auto-detected at runtime for plots (PNG vs GIF, etc.)
+		- perl-DBD-MySQL dependencies handled more efficiently in RPM build scripts
+		- better logging from consolidator script
+
+	Major Bugfixes:
+
+		- various minor bugs addressed
+		- fixed 'delete all alerts' button
+		- changed rack to a string (previous limit was a 8-bit integer type)
+		- fixed process window not behaving as a pop-up correctly
+		- fixed consolidator cron job entry
+		- fixed stylesheet errata
+
+
+Release_010 (November 2007)
+---------------------------
+
+	Notable New Features:
+
+		- automated trigger-based long-term data consolidation (round-robin)
+		- WARNING: MySQL 5.045 or higher now required to support round-robin features!!
+		- new bin utilities included (vsrsh, vscopy, netload, diskload, check_acucli, port_listing)
+		- automatic hostid detection/generation (persistence across system rebuilds)
+
+	Improvements:
+
+		- reduced database contention via consolidation triggers (better performance)
+		- streamlined profile editing interface
+		- wider range of plotting windows offered (1 hour up to 5 years)
+		- simplified installation process, better RPM packaging
+	
+	Major Bugfixes:
+
+		- various minor bugs addressed
+
+
+
+Release_009 (February 2007)
+---------------------------
+
+	Notable New Features:
+
+		- now providing Source RPMs for the most-commonly needed prerequisites
+		- alerts are now automatically purged on a configurable schedule
+
+	Improvements:
+
+		- detailed node report features improved tab handling
+		- updated the installation guide
+		- pinger overhauled and brought up to date
+		- archiving support has been improved
+	
+	Major Bugfixes:
+
+		- reworked a few queries to work around a common MySQL bug 
+		- several minor bugs addressed
+
+
+
+Release_008 (September 2006)
+---------------------------
+
+	Notable New Features:
+
+		- added daily report capability for long-term system report archiving
+		- new RPM-based installation for core perl modules ZUtils::Common and ZUtils::Aware
+		- added support for monitoring of per-disk utilization
+		- added support for monitoring of per-disk I/O load
+		- added support for monitoring system uptime
+		- added support for monitoring shared memory usage 
+		- added initial support for monitoring commit_ratios (where available)
+		- added initial system monitor functionality (next AWARE release will expand on
+		  this capability)
+
+	Improvements:
+
+		- greatly enhanced node reporting page
+		- installer logic updated to build RPMS for the local platform upon installation
+	
+	Major Bugfixes:
+
+		- profile summary page was fixed
+		- fixed disk I/O calculation
+
+
+Release_007 (April 2006)
+---------------------------
+
+	Notable New Features:
+
+		- major CSS facelift, lighter look and feel
+		- better perl module-based approach for web scripts
+		- introduced simpler configuration process
+		- now includes database loading script
+
+	Improvements:
+
+		- greatly enhanced status presentation 
+		- clean up inconsistent references (aware vs sysmon)
+		- better separation of application and configuration
+		- extended documentation
+	
+	Major Bugfixes:
+
+		- GD plots are now sized consistently
+
+
+Release_006 (November 2005)
+---------------------------
+
+	Notable New Features:
+
+		- transition to top-based drop-down menu system (most modern browsers supported)
+		- added profile status page which allows for summary of statistics by profile
+		- added system processes page featuring sortable columns
+		- added temperature support for LNF IPMI hardware
+		- added release notes link to menu system
+
+	Improvements:
+
+		- improved alert system now allows for "clearing" of alerts without deletion
+		- database tool overhauled, added several new fields and features
+		- improved table_dumper utility and handling of default profile table
+
+	Major Bugfixes:
+
+		- network tx/rx statistics are now calculated correctly
+		- database field size increased for tx/tx and disk I/O to avoid truncation
+		- new alert counting method should ensure accuracy of alert-counts
+
+
+
+Release_005 (July 2005)
+---------------------------
+
+	Notable New Features:
+
+		- added support for multi-line status views for disk, temperature and memory
+		- added temperature support for newer HP hardware
+		- web interface now easily "skinnable" using stylesheet setting
+		- added network tx/rx rate monitoring
+		- installation guide should amk
+
+	Improvements:
+
+		- added support for more temperature sensors
+		- status page now offers a 'view-by-profile' option  
+
+	Major Bugfixes:
+		
+		- just the usual stuff
+
+
+
+Release_002 (May 2005) 
+---------------------------
+
+	Notable New Features:
+
+		- profile support finalized
+
+	Improvements:
+	
+		- better temperature support on Dell, HP and LNF hardware
+
+	Major Bugfixes:
+
+		- just the usual stuff
+
+
+
+Release_001 (April 2005) 
+---------------------------
+
+	Notable New Features:
+
+		- N/A
+
+	Improvements:
+	
+		- N/A
+
+	Major Bugfixes:
+
+		- N/A
+
+
+
+
+
+
+
+
+

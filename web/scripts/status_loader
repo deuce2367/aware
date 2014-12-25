@@ -1,0 +1,292 @@
+#!/usr/bin/perl -w
+
+# status_loader -- This shell script takes care of starting and stopping the status_loader daemon
+# 
+# chkconfig: 2345 85 25 
+# description: status_loader loads system monitoring reports into the local database 
+#
+
+# ----------------------------
+# $Revision: 1.4 $
+# $Date: 2008-06-26 22:01:37 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+# ----------------------------
+
+use strict;
+use DBI;
+use POSIX;
+use Time::Local;
+use Time::HiRes qw(usleep gettimeofday tv_interval);
+use ZUtils::Common;
+use ZUtils::Aware;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+
+load_config("/etc/aware/aware.cfg");
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Settings
+#-------------------------------------------------------------------------------------------------------------------
+
+# name - the name of this process 
+my $NAME = "status_loader";
+
+# pidfile - the file where we will store our pid
+my $PIDFILE = "/var/run/$NAME.pid";
+
+# sleep time in seconds - default value, controlled/configured via the web ifc
+my $SLEEP = 15;
+
+# default verbosity
+my $VERBOSITY = 1;
+
+# daemon mode (default)
+my $DAEMON = 1;
+
+# log file
+my $LOGFILE = "/var/log/$NAME.log";
+
+# CVS Version
+my $version = '$Revision: 1.4 $';
+$version =~ s/^\$(.*)\s\$$/$1/g;
+
+# Location of message files 
+my $message_dir = get_config("message_directory", "/var/www/html/aware/messages");
+if (!-d $message_dir) {
+    print "FATAL ERROR: unable to open queue directory '$message_dir'\n";
+    exit();
+}
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Daemon Initialization
+#-------------------------------------------------------------------------------------------------------------------
+set_config("logfile", get_config("log_dir") . "/$NAME.log");
+set_config("pidfile", get_config("pid_dir") . "/$NAME.pid");
+set_config("verbosity", $VERBOSITY);
+set_config("daemon", $DAEMON);
+
+if ($DAEMON) {
+# Fork child and exit from parent - i.e. launch the daemon
+    launch_daemon($NAME);
+}
+
+# Handle these signals so we can exit gracefully
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+#-------------------------------------------------------------------------------------------------------------------
+# Main Daemon Body 
+#-------------------------------------------------------------------------------------------------------------------
+
+print_log("-------$NAME $version initializing (debug level = $VERBOSITY)-------", 0);
+
+my $hostid;
+my $dbh;
+
+until ($time_to_die) {
+
+    print_log("Starting $NAME", 2);
+
+    # open database connection, retry until successful
+    $dbh = get_db_connection();
+
+    while(!defined($dbh)) {
+        print_log("Error connecting to database", 0);
+        sleep(5);
+        $dbh = get_db_connection();
+    }
+
+    # check our status
+    my $sth = $dbh->prepare("select status, frequency from daemon_tasking where daemon = '$NAME'");
+    if (!$sth->execute()) { print_log("Database Error: " . $dbh->errstr, 0); }
+    my @row = $sth->fetchrow();
+    my $running = $row[0] || 0;
+    if (defined($row[1])) { $SLEEP = $row[1]; }
+
+    if (!$running) {
+        # if we've been turned off via web ifc -- do nothing 
+        my $sql = "replace into daemon (hostid, name, updated, status, version) values
+            ($hostid, '$NAME', now(), 'stopped', '$version')";
+        $dbh->do($sql) || print_log("Database Error: " . $dbh->errstr, 0); 
+
+        $sth->finish();
+        $dbh->disconnect();
+
+        sleep($SLEEP);
+        next;
+    }
+
+
+    $dbh->do("replace into daemon (hostid, name, updated, status, version) 
+        values ($hostid, '$NAME', now(), 'running', '$version')") ||
+        print_log("Database Error: " . $dbh->errstr, 0); 
+
+
+    # -- this hash will store the reporting intervals
+    my %intervals;
+
+    # -- build the component hash
+    my %components;
+    my $sql = "select name, id, report_interval from component where report != 0";
+    $sth = $dbh->prepare($sql) || print_log("ERROR preparing query ($sql): " . $dbh->errstr, 0);
+    if (!$sth->execute()) { print_log("ERROR executing query ($sql): " . $dbh->errstr, 0); }
+    while (my @row = $sth->fetchrow()) { 
+        my $this_cname = $row[0];
+        my $this_cid = $row[1];
+        my $this_cinterval = $row[2] || 300;
+        print_log(" - component [name = " . lc($this_cname) . ", id = $this_cid, interval = $this_cinterval]", 2);
+        $components{lc($this_cname)} = $this_cid;
+        $intervals{$this_cid} = $this_cinterval;
+    }
+
+    # -- build the subsystem hash
+    my %subsystems;
+    $sql = "select name, id from subsystem";
+    $sth = $dbh->prepare($sql) || print_log("ERROR preparing query ($sql): " . $dbh->errstr, 0);
+    if (!$sth->execute()) { print_log("ERROR executing query ($sql): " . $dbh->errstr, 0); }
+    while (my @row = $sth->fetchrow()) { $subsystems{lc($row[0])} = $row[1]; }
+
+    # -- now go look for new messages
+    my @messages = `find $message_dir -type f -maxdepth 1 -mindepth 1`;
+
+
+    # -- this query is used to insert any messages that are found
+    $sql = "insert into status_message (id, component_id, status, message, created, sid) 
+        values (?, ?, ?, ?, to_date(?, 'yyyy-mm-dd hh24:mi:ss'), 'system')";
+    $sth = $dbh->prepare($sql) || print_log("ERROR preparing query ($sql): " . $dbh->errstr, 0);
+
+
+    # -- iterate over the message array (list of files)
+    for (my $i = 0; $i <= $#messages; $i++) {
+
+        chomp(my $messageFile = $messages[$i]);
+
+        # -- this retrieves name/value pairs from a message file
+        my %fields = read_config($messageFile);
+        
+        my $reported = $fields{created};
+        $reported = from_unixtime($reported);
+
+        my $subsystem = $fields{subsystem};
+        my $component = $fields{component};
+        my $message = $fields{'message'};
+        my $status = $fields{'status'};
+        my $interval = $fields{'interval'} || -1;
+
+        # 20080331/gfr  truncate the message so that the insert will not fail
+        $message = substr ($message, 0, 1024);
+
+        # -- find the ID for this component 
+        my $componentID = 0;
+        if (defined($components{lc($component)})) { $componentID = $components{lc($component)}; }
+        print_log(" - message from '$component' ID  => $componentID", 2);
+
+        if (!$componentID) {
+            # -- this appears to be a new component
+            print_log("WARNING: received message from unrecognized component: '$component'", 0);
+
+        
+            # -- is this also a new subsystem???
+            my $thisSubsystemID = $subsystems{$subsystem};
+            if (!defined($thisSubsystemID)) { 
+                my $sql = "insert into subsystem (name, updated) values ('$subsystem', sysdate)";
+                my $ich = $dbh->prepare($sql) || print_log("SQL Error ($sql)" . $dbh->errstr, 0);
+                $ich->execute() || print_log("DB Error($sql): " . $dbh->errstr, 0);
+                my $newSubsystemID = $ich->{'mysql_insertid'} || 0;
+                $subsystems{$subsystem} = $newSubsystemID;
+                print_log(" - added new subsystem '$subsystem' (id == $newSubsystemID)", 0);
+            }
+
+            # -- need to add this component
+            $sql = "insert into component(name, report_interval, subsystem_id, report, updated) 
+                values ('$component', $interval, '$thisSubsystemID', 1, sysdate)";
+            my $ich = $dbh->prepare($sql) || print_log("SQL Error ($sql)" . $dbh->errstr, 0);
+            $ich->execute() || print_log("DB Error($sql): " . $dbh->errstr, 0);
+            my $newComponentID = $ich->{'mysql_insertid'} || 0;
+            $components{lc($component)} = $newComponentID;
+            $intervals{$newComponentID} = $interval;
+            print_log(" - added new component '$component' (id == $newComponentID)", 0);
+            $componentID = $newComponentID;
+            
+        } 
+
+
+        # -- note if the reported interval schedule is different than what we have on file
+        print_log("Current Interval = $intervals{$componentID}, Reported Interval = $interval", 2);
+        if ($intervals{$componentID} != $interval && $interval > 0) {
+            my $sql = "update component set report_interval = $interval where id = $componentID";
+            print_log(" - interval change: Current Interval = $intervals{$componentID}, Reported Interval = $interval", 1);
+            $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+            $intervals{$componentID} = $interval;
+        }
+
+        # -- now go ahead and insert the message
+        print_log("Inserting $componentID, $status, $message, $reported", 1);
+        if ($sth->execute($componentID, $status, $message, $reported)) {
+            my $insertID = $sth->{'mysql_insertid'} || 0;
+            my $sql = "update component set status_message_id = $insertID, updated = now() where id = $componentID";
+            $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+            print_log("loaded $messageFile ($i / $#messages)", 1);
+            unlink($messageFile);
+        } else {
+            print_log("Database Error: " . $dbh->errstr, 0);
+        }    
+
+    }
+
+    # -- Check for late/missing component updates
+    foreach my $cname (keys(%components)) {
+
+        # grab the id and schedule for each component
+        my $componentID = $components{"$cname"}; 
+        my $interval = $intervals{$componentID};
+
+        print_log("Checking for '$cname' update", 2);
+        my $sql = "select status, unix_timestamp(now()) - unix_timestamp(created) age 
+            from status_message where component_id = $componentID order by created desc limit 1";
+        my $sth = $dbh->prepare($sql);
+        if ($sth->execute()) {
+            while(my @row = $sth->fetchrow()) {
+                
+                my $status = $row[0];
+                my $age = $row[1];
+
+                if ($age > $interval) {
+                    print_log("'$cname' is late ($age > $interval) with an update", 0);
+                    $dbh->do("insert into status_message (component_id, status, message, created, sid) 
+                        values ($componentID, 'unknown', 'No update received', now(), 'system')");
+                }
+
+            }
+        } else {
+            print_log("Database Error ($sql): " . $dbh->errstr, 0);
+        }
+    }
+
+
+    # -- we're done so clean up the database handles and take a nap
+    $sth->finish();
+    $dbh->commit();
+    $dbh->disconnect();
+    print_log("$NAME run complete", 2);
+
+    sleep($SLEEP);
+}
+
+clearPid();
+$dbh = get_db_connection();
+if (defined($dbh)) {
+    $dbh->do("replace into daemon (hostid, name, updated, status, version) 
+        values ($hostid, '$NAME', now(), 'shutdown signal received', '$version')"); 
+    print_log("$NAME database status updated", 1);
+}
+$dbh->disconnect();
+print_log("$NAME shutdown complete", 0);
+

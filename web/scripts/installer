@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+
+# $Revision: 1.20 $
+# $Date: 2007-11-25 18:25:59 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+
+use Sys::Hostname;
+use strict;
+
+#-----------------------------------------------------------------------------------------------------------------
+# These variables MUST be set to appropriate local values!
+#-----------------------------------------------------------------------------------------------------------------
+my $target = "localhost";
+
+#-----------------------------------------------------------------------------------------------------------------
+# Edit these only if you know what you are doing
+#-----------------------------------------------------------------------------------------------------------------
+my $hostid_dir = "/etc/aware";
+my $hostid_file = "hostid";
+my $tempDir = "/tmp/";
+my $etcDir = "/etc/init.d";
+my $fileurl = "http://$target/aware/";
+
+my $scriptName = "aware_daemon";
+my $configFile = "aware.cfg";
+my @srpms = ('perl-ZUtils-Common-1.40-1.src.rpm', 'perl-ZUtils-Aware-1.25-1.src.rpm', 'aware-010-1.src.rpm');
+my @specs = ('perl-ZUtils-Common.spec', 'perl-ZUtils-Aware.spec'); 
+my @rpms = ('perl-ZUtils-Common-1.40-1.i386.rpm', 'perl-ZUtils-Aware-1.25-1.i386.rpm', 'aware-client-010-1.i386.rpm'); 
+
+
+#-----------------------------------------------------------------------------------------------------------------
+# Shouldn't need to edit anything after this point
+#-----------------------------------------------------------------------------------------------------------------
+
+
+# Make sure we are root - no point in proceeding otherwise
+chomp(my $username = `whoami`);
+
+if ($username !~ m/root/) {
+	print "Error: you really need to be root to install this stuff...\n";
+	exit();
+}
+
+# Create Hostid
+if (! -d $hostid_dir) {
+	`mkdir $hostid_dir`;
+}
+
+if (! -e "$hostid_dir/$hostid_file") {
+	my $hostname = hostname();
+	if ($hostname =~ m/^localhost$/) {
+		my $datetime = timelocal(localtime());
+		$hostname = "$hostname.$datetime";
+	}
+
+	`echo $hostname > $hostid_dir/$hostid_file`;
+}
+
+
+# Set up prerequisites 
+my $result = "";
+if (! -d $tempDir) { chomp($result = `mkdir $tempDir 2>&1`); }
+if ($result && !-d $tempDir) {
+	print "Error: unable to create $tempDir [$result]\n";
+	exit();
+} elsif ($result) {
+	print "Warning: $result\n";
+}
+
+$result = "";
+if (! -d $etcDir) { chomp($result = `mkdir $etcDir 2>&1`); }
+if ($result && !-d $etcDir) {
+	print "Error: unable to create $etcDir [$result]\n";
+	exit();
+} elsif ($result) {
+	print "Warning: $result\n";
+}
+
+
+# Retrieve and install AWARE cfg file
+system("wget $fileurl/scripts/$configFile 2>&1");
+system("cp $configFile /etc/aware/ 2>&1");
+unlink($configFile);
+
+# Retrieve and install AWARE RPM's
+for (my $i = 0; $i <= $#srpms; $i++) {
+	my $srpm = $srpms[$i];
+	my $rpm = $rpms[$i];
+	my $spec = $specs[$i];
+
+	system("wget $fileurl/scripts/$srpm 2>&1");
+	system("rpm -ivh $srpm 2>&1");
+	system("rpmbuild -ba /usr/src/redhat/SPECS/$spec 2>&1");
+	system("rpm -Uvh /usr/src/redhat/RPMS/i386/$rpm 2>&1");
+	unlink($srpm);
+
+}
+
+# Now download and install the daemon 
+system("wget $fileurl/scripts/$scriptName 2>&1");
+print "\n- Installing service, this may take a second...\n";
+system("cp $scriptName /etc/init.d/ 2>&1");
+system("chmod 755 /etc/init.d/$scriptName 2>&1");
+system("/sbin/chkconfig --add $scriptName 2>&1");
+system("/sbin/service $scriptName restart 2>&1");
+unlink($scriptName);

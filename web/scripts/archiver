@@ -1,0 +1,238 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------
+# archiver - this command line tool will attempt to generate daily reports for all nodes in the
+# AWARE system -- if a number is passed in as a parameter then the report will be generated for
+# the period that was that many days ago -- i.e. for yesterday use: "archiver 1"
+#
+# $RCSfile: archiver,v $
+# $Revision: 1.7 $
+# $Date: 2007-11-02 13:57:08 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+#-----------------------------------------------------------------------------------------------
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Sys::Hostname;
+use Socket;
+use LWP::UserAgent;
+use HTTP::Request::Common;
+use ZUtils::Common;
+use ZUtils::Aware;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+
+load_config("/etc/aware/aware.cfg");
+
+#-----------------------------------------------------------------------------------------------
+# These variables MUST be set to appropriate local values!!!
+#-----------------------------------------------------------------------------------------------
+
+# Daemon settings
+my $NAME = "archiver";
+my $DAEMON = 0;
+my $DAYSAGO = 0;
+
+# Try to retrieve settings from config
+my $VERBOSITY = get_config("verbosity") || 1;
+my $retries = get_config("retries") || 9999;
+
+# Logging/PIDFILE Options
+set_config("daemon", $DAEMON);
+set_config("verbosity", $VERBOSITY);
+set_config("logfile", "/var/log/$NAME.log");
+set_config("pidfile", "/var/run/$NAME.pid");
+set_config("name", $NAME);
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Settings (edit as appropriate)
+#-----------------------------------------------------------------------------------------------
+
+# -- these AWARE settings may be configured from the web interface
+my $HOSTIDFILE = "/etc/aware/hostid";
+my $SLEEP = 45;
+my $WINDOW = 10;
+my $LOGPROCS = 1;
+
+
+#-----------------------------------------------------------------------------------------------
+# Ideally - one shouldn't need to edit anything after this point...
+#-----------------------------------------------------------------------------------------------
+my $PIDFILE = "/var/run/$NAME.pid";
+
+# CVS Version
+my $_version = '$Revision: 1.7 $';
+$_version =~ s/^\$(.*)\s\$$/$1/g;
+
+
+#-----------------------------------------------------------------------------------------------
+# Handle these signals so we can exit gracefully
+#-----------------------------------------------------------------------------------------------
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+#-----------------------------------------------------------------------------------------------
+# Determine if we want to run in the foreground or background
+#-----------------------------------------------------------------------------------------------
+if ($DAEMON) {
+
+	# -- fork child and exit from parent
+	setsid();
+	my $pid = fork;
+	if ($pid) {
+		#$SIG{CHLD} = 'IGNORE';
+		exit();
+	}
+	die "Error forking process: $!" unless defined($pid);
+
+	if (set_pid($NAME, get_config("pidfile")) != $$) {
+		print "$NAME is already running\n";
+		print_log("$NAME already active (check '$PIDFILE')", 2); 
+		exit;
+	}
+
+	print "$NAME started\n";
+
+	# -- Important - helps prevent ssh/rsh hangs
+	close(STDIN);
+	close(STDOUT);
+	close(STDERR);
+}
+
+print_log("------------ $NAME initializing (pid = $$, debug level = $VERBOSITY) ------------", 0);
+if ($#ARGV >= 0) { chomp($DAYSAGO = $ARGV[0]); }
+
+my $dbh = get_db_connection($retries);
+my $url = "http://".get_config("web_host")."/".get_config("web_dir")."/node_pane.cgi";
+
+my $datestring = get_date(-$DAYSAGO);
+$datestring =~ s/\s.*//g;
+$datestring =~ s/-//g;
+print_log(" - generating daily reports for $datestring: $url", 1);
+
+my $archDir = get_config("aware_home")."/web/archive/$datestring";
+
+
+# -- get a list of nodes that we wish to report on
+my $sql = "select a.id, a.hostname, b.name from node a, profile b where a.profile_id = b.id and a.online = 1 order by a.hostname";
+my $sth = $dbh->prepare($sql) || print_log("ERROR: " . $dbh->errstr, 0);
+$sth->execute() || print_log("ERROR: " . $dbh->errstr); 
+
+while (my @row = $sth->fetchrow()) {
+
+	my $hostid = $row[0];
+	my $hostname = $row[1];
+	my $profile = $row[2];
+	my $html = "$hostname-$profile-$datestring-host.html";
+
+	# -- issue an HTTP request to the AWARE server
+	my $user_agent = LWP::UserAgent->new(keep_alive=>1, timeout => 500);
+	my $request = POST $url, Content =>	
+		[ 
+			tab => 'combined',
+			window => 24,
+			archive => 1,
+			daysAgo => $DAYSAGO,
+			hostid => $hostid
+		];
+
+	print_log(" - requesting url: $url (tab=combined,window=24,archive=1,daysAgo=$DAYSAGO,hostid=$hostid)", 2);
+	my $response = $user_agent->request($request);
+
+	my $httpStatus = $response->{_rc};
+	my $httpResponse = $response->{_msg};
+	my $httpContent = $response->{_content};
+
+	open(OUT, ">$archDir/$html") or die "Cannot open '$archDir/$html' check permissions!";
+	print OUT $httpContent;
+	close(OUT);
+
+	print_log(" - HTTP status code: $httpStatus", 2);
+	print_log(" - HTTP response: $httpResponse", 2);
+	print_log(" - HTTP content: $httpContent", 2);
+
+	if ($httpStatus == 200) { 
+
+		# -- now generate a report for each host
+		print_log(" - report generated for $hostname (id=$hostid): $archDir/$html", 1);
+
+	} else {
+
+		print_log("WARNING: error encountered during HTTP request: $httpStatus", 0);
+		print_log($httpContent, 1);
+		print_log($httpResponse, 2);
+
+	}
+
+}
+
+
+# -- get a list of profiles that we wish to report on
+$url = "http://".get_config("web_host")."/".get_config("web_dir")."/profile_status.cgi";
+$sql = "select count(*), a.name, a.id from profile a, node b where a.id = b.profile_id and b.online = 1 group by a.name, a.id order by a.name";
+$sth = $dbh->prepare($sql) || print_log("ERROR: " . $dbh->errstr, 0);
+$sth->execute() || print_log("ERROR: " . $dbh->errstr); 
+
+while (my @row = $sth->fetchrow()) {
+
+	my $count = $row[0];
+	my $profile = $row[1];
+	my $profile_id = $row[2];
+	my $html = "$profile-$datestring-profile.html";
+
+	# -- issue an HTTP request to the AWARE server
+	my $user_agent = LWP::UserAgent->new(keep_alive=>1, timeout => 500);
+	my $request = POST $url, Content =>	
+		[ 
+			popup => 1,
+			window => 24,
+			archive => 1,
+			daysAgo => $DAYSAGO,
+			profile_id => $profile_id
+		];
+
+	my $response = $user_agent->request($request);
+
+	my $httpStatus = $response->{_rc};
+	my $httpResponse = $response->{_msg};
+	my $httpContent = $response->{_content};
+
+	open(OUT, ">$archDir/$html");
+	print OUT $httpContent;
+	close(OUT);
+
+	#print_log(" - HTTP status code: $httpStatus", 1);
+	#print_log(" - HTTP response: $httpResponse", 1);
+	#print_log(" - HTTP content: $httpContent", 1);
+
+	if ($httpStatus == 200) { 
+
+		# -- now generate a report for each host
+		print_log(" - report generated for profile $profile (profile_id=$profile_id): $archDir/$html", 1);
+
+	} else {
+
+		print_log("WARNING: error encountered during HTTP request: $httpStatus", 0);
+		print_log($httpContent, 1);
+		print_log($httpResponse, 2);
+
+	}
+
+}
+
+
+# -- close out our database statement-handle and connection
+$sth->finish();
+$dbh->disconnect(); 
+
+# -- finished
+print_log("$NAME complete", 0);
+exit();
+
+

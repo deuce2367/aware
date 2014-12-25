@@ -1,0 +1,1525 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------
+# aware_daemon This shell script takes care of starting and stopping the node statistics daemon
+#
+# chkconfig: 2345 85 25 
+# description: aware_daemon loads system monitoring stats into the central database
+#
+#-----------------------------------------------------------------------------------------------
+
+my $VERSION = '$Rev: 610 $';
+$VERSION =~ s/^\$.*:\s(.*)\s\$$/Revision: $1/g;
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Sys::Hostname;
+use Socket;
+use ZUtils::Common;
+use ZUtils::Aware;
+use XML::Writer;
+use IO::Handle;
+use LWP::UserAgent;
+use HTTP::Request::Common;
+use strict;
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+load_config("/etc/aware/aware.cfg");
+
+#-----------------------------------------------------------------------------------------------
+# These variables MUST be set to appropriate local values!!!
+#-----------------------------------------------------------------------------------------------
+
+# Daemon settings
+my $NAME = "aware_daemon";
+my $DAEMON = 1;
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Settings (edit as appropriate)
+#-----------------------------------------------------------------------------------------------
+
+# Try to retrieve settings from config
+my $VERBOSITY = get_config("verbosity") || 0;
+my $retries = get_config("retries") || 9999;
+
+# Logging Options
+set_config("daemon", $DAEMON);
+set_config("verbosity", $VERBOSITY);
+set_config("logfile", "/var/log/$NAME.log");
+set_config("pidfile", "/var/run/$NAME.pid");
+set_config("name", $NAME);
+
+# File Options
+my $HOSTIDFILE = "/etc/aware/hostid";
+my $PIDFILE = get_config("pidfile");
+
+
+
+#-----------------------------------------------------------------------------------------------
+# Ideally - one shouldn't need to edit anything after this point...
+#-----------------------------------------------------------------------------------------------
+
+
+# max cpus -- the max number of cpus supported (currently 8)
+my $MAXCPUS = 8;
+
+# command line param
+my $USAGE = lc($ARGV[0]) || "";
+
+#-----------------------------------------------------------------------------------------------
+# Daemon Initialization
+#-----------------------------------------------------------------------------------------------
+
+if ($USAGE ne "start" && $USAGE ne "stop" && $USAGE ne "restart" && $USAGE ne "status") {
+    print "\n\tStats Daemon ($VERSION)\n";
+    print "\t=============================\n\n";
+    
+    print "\tUsage: $NAME {start|stop|status|restart} [verbosity]\n\n";
+    exit(0);
+}
+
+
+if ($USAGE eq "stop") {
+    stop_daemon($PIDFILE, $NAME);
+    exit(0);
+} elsif ($USAGE eq "restart") {
+    stop_daemon($PIDFILE, $NAME);
+} elsif ($USAGE eq "status") {
+    print_status($PIDFILE, $NAME);
+    exit(0);
+}
+
+
+#-----------------------------------------------------------------------------------------------
+# Handle these signals so we can exit gracefully
+#-----------------------------------------------------------------------------------------------
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&signal_handler;
+
+
+#-----------------------------------------------------------------------------------------------
+# Determine if we want to run in the foreground or background
+#-----------------------------------------------------------------------------------------------
+if ($DAEMON) {
+
+    # -- fork child and exit from parent
+    setsid();
+    my $pid = fork;
+    if ($pid) {
+        #$SIG{CHLD} = 'IGNORE';
+        exit();
+    }
+    die "Error forking process: $!" unless defined($pid);
+
+    if (set_pid($NAME, $PIDFILE) != $$) {
+        print "$NAME is already running\n";
+        print_log("$NAME already active (check '$PIDFILE')", 2); 
+        exit;
+    }
+
+    print "$NAME started\n";
+
+    # -- Important - helps prevent ssh/rsh hangs
+    close(STDIN);
+    close(STDOUT);
+    close(STDERR);
+}
+
+print_log("------------ $NAME $VERSION initializing (pid = $$, debug level = $VERBOSITY) ------------", 0);
+
+
+# -- loop Globals 
+my ($hostid, $dbh, $profile_id, $profile_name, $xmlDoc, $xml, $sql, $sth);
+my $BOOTED = 0;
+my $SLEEP = 45;
+my $WINDOW = 10;
+my $TIMEOUT = 120;
+my $LOGPROCS = 1;
+my $HUNGSENSORS = 0;
+my $UPDATED;
+my $COUNT = 0;
+my @smartDiskDevices;
+my %globalSensorHash;
+my $userAgent = LWP::UserAgent->new(agent => 'perl post');
+my $xmlURL = get_config("xml_url") || "http://iczomon/aware/xml.cgi";
+my $xmlReporting = get_config("xml_reporting") || 0;
+my $xmlInterval = get_config("xml_interval") || 5;
+my $xmlDelivery = get_config("xml_delivery") || "post";
+my $xmlDirectory = get_config("xml_directory") || "/tmp";
+my $RANDOM = .05;
+initialize_xml();
+
+
+
+until ($time_to_die) {
+
+
+    eval {
+
+        # -- get a database connection
+        $dbh = get_db_connection($retries);
+
+        # -- check status and frequency of daemon configuration
+        $sql = "select status, frequency from daemon_tasking where daemon = '$NAME'";
+        $sth = $dbh->prepare($sql);
+        $sth->execute();
+        my @row = $sth->fetchrow();
+        my $running = 1;
+        if (defined($row[0])) { $running = $row[0]; }
+        if (defined($row[1])) { $SLEEP = $row[1]; }
+        $sth->finish();
+
+        if (!$running) {
+            $dbh->disconnect();
+            sleep($SLEEP);
+            next;
+        }
+
+        # -- retrieve database-controlled setting values
+        $WINDOW = get_setting($dbh, "sample_window", 10);
+        $LOGPROCS = get_setting($dbh, "log_procs", 1);
+        $RANDOM = get_setting($dbh, "random", .05);
+        $TIMEOUT = get_setting($dbh, "sensor_timeout", 120);
+    
+        my $hostname = hostname();
+        my ($hostid, $serial) = get_host_id($dbh, $HOSTIDFILE, $hostname);
+
+        # -- release the db connection until we need it again
+        $dbh->disconnect();
+
+        if ($hostid <= 0) {
+            sleep($SLEEP);
+            next;
+        }
+
+        # -- load current config from system configuration file
+        load_config("/etc/aware/aware.cfg");
+
+
+        # ---------------------------------------------------------------------------
+        # retrieve some basic machine information
+        # ---------------------------------------------------------------------------
+
+        my $ipaddr = gethostbyname($hostname) || gethostbyname("127.0.0.1");
+        $ipaddr = inet_ntoa($ipaddr);
+    
+        # -- if either of these are untrue then we cannot usefully report our status
+        if (length ($serial) < 1 || lc($hostname) eq "localhost") {
+
+            print_log("ERROR -- missing serial ($serial) and/or hostname ($hostname)", 0);
+            exit;
+        }
+
+        # -- Initialize alert variables
+        my @alerts;
+        my $alert = 0;
+
+        # -- OS/Kernel Revision
+        my $os = (uname)[2];
+        my $arch = (uname)[4];
+    
+        # -- Count/Log procs
+        my @procs = `ps -eo pid,ppid,user,\%cpu,\%mem,nice,pri,etime,stime,rsz,sz,vsz,ucomm,args`;
+        my $numProcs = $#procs;
+    
+        # -- what kind of CPU are we running?
+        my $num_cpu = 0;
+        my $cpu_type = "";
+        open(CPUINFO, "</proc/cpuinfo");
+            while(<CPUINFO>) {
+                chomp($_);
+                if ($_ !~ m/:/) { next; }
+                my ($label, $value) = split(/:/, $_);
+                $value =~ s/^\s+//g;
+                print_log("CPUINFO: $label -> $value", 3);
+                if ($label =~ m/^processor/) { $num_cpu++; }
+                if ($label =~ m/^model name/) { $cpu_type = $value }
+        }
+        close(CPUINFO);
+
+
+
+        # ---------------------------------------------------------------------------
+        # set up xml document xmlDoc
+        # ---------------------------------------------------------------------------
+        # -- this will be the timestamp for our updates
+        $UPDATED = get_date();
+        my $xmlDate = $UPDATED;
+        $xmlDate =~ s/ /T/g;
+        $xmlDoc->startTag('report', 'hostId' => $serial, 'eventTime' => $xmlDate, 'sampleWindow' => $WINDOW, 'clientVersion' => $VERSION);
+
+
+
+        # ---------------------------------------------------------------------------
+        # now let's calculate utilization for System / CPU / Disk-IO 
+        # ---------------------------------------------------------------------------
+
+        # -- disk information files / 2.4 Kernel
+        my $disk_statsfile = "/proc/partitions";
+        if (-e "/proc/diskstats") { $disk_statsfile = "/proc/diskstats"; } 
+    
+        # -- disk stats
+        my @before_diskio = ();
+        open (PART, "<$disk_statsfile");
+        while (<PART>) { push(@before_diskio, $_); }
+        close(PART);
+
+        # -- network stats
+        my @before_nic = ();
+        open (STAT, "</proc/net/dev");
+        while (<STAT>) { push(@before_nic, $_); }
+        close(STAT);
+    
+        # -- cpu stats
+        my @before_stat = ();
+        open (STAT, "</proc/stat");
+        while (<STAT>) { push(@before_stat, $_); }
+        close(STAT);
+    
+        # -- sleep for the specified time (in seconds)
+        sleep($WINDOW);
+    
+        # -- gather cpu stats
+        my @after_stat = ();
+        open (STAT, "</proc/stat");
+        while (<STAT>) { push(@after_stat, $_); }
+        close(STAT);
+
+        # -- gather network stats 
+        my @after_nic = ();
+        open (STAT, "</proc/net/dev");
+        while (<STAT>) { push(@after_nic, $_); }
+        close(STAT);
+
+        # -- gather disk stats
+        my @after_diskio;
+        open (PART, "<$disk_statsfile");
+        while (<PART>) { push(@after_diskio, $_); }
+        close(PART);
+    
+
+        # -- Calculate CPU Stats
+        chomp($before_stat[0]);
+        chomp($after_stat[0]);
+
+        my ($cpu1, $user1, $nice1, $sys1, $idle1, $iowait1, $irq1, $softirq1) = split(/\s+/, $before_stat[0]);
+        my ($cpu2, $user2, $nice2, $sys2, $idle2, $iowait2, $irq2, $softirq2) = split(/\s+/, $after_stat[0]);
+        my $diffUser = ($user2) - ($user1);
+        my $diffSystem = ($nice2 + $sys2) - ($nice1 + $sys1);
+
+        my $userTotal = ($user2 - $user1) / ($num_cpu * $WINDOW); 
+        my $niceTotal = ($nice2 - $nice1) / ($num_cpu * $WINDOW); 
+        my $systemTotal = ($sys2 - $sys1) / ($num_cpu * $WINDOW); 
+        my $iowaitTotal = 0;
+        my $irqTotal = 0;
+        my $softirqTotal = 0;
+        if (defined($iowait1)) {
+            # this kernel supports the newer stat reporting
+            $iowaitTotal = ($iowait2 - $iowait1) / ($num_cpu * $WINDOW); 
+            $irqTotal = ($irq2 - $irq1) / ($num_cpu * $WINDOW); 
+            $softirqTotal = ($softirq2 - $softirq1) / ($num_cpu * $WINDOW); 
+            
+            $diffSystem = ($nice2 + $sys2 + $iowait2 + $irq2 + $softirq2) - 
+                ($nice1 + $sys1 + $iowait1 + $irq1 + $softirq1);
+        }
+        my $userload = sprintf("%0.0f", ($diffUser / $num_cpu) / $WINDOW);
+        my $sysload = sprintf("%0.0f", ($diffSystem  / $num_cpu) / $WINDOW);
+        my $totalLoad = $userload + $sysload;
+        my $idleTotal = 100 - ($totalLoad);
+    
+        if ($idleTotal < 0) { 
+            # -- of course this shouldn't happen, but you never know
+            $idleTotal = 0;
+            print_log("INFO: Total CPU consumption ($totalLoad) is over 100% (probably harmless)", 1);
+        }
+        
+        print_log("Total System Load = $totalLoad%", 2);
+
+    
+        # -- Calculate Disk Stats -- should work for both 2.4 and 2.6 kernels
+        my ($kbIn, $kbOut, $devicesRef, $serviceTimesRef, $readBytesRef, $writeBytesRef, $utilizationsRef) = 
+            get_disk_stats(\@before_diskio, \@after_diskio);
+        my %diskDevices = %{$devicesRef};
+        my %serviceTimes = %{$serviceTimesRef};
+        my %readBytes = %{$readBytesRef};
+        my %writeBytes = %{$writeBytesRef};
+        my %diskUtilizations = %{$utilizationsRef};
+    
+    
+        # -- calculate network stats (total and per-interface)
+        my ($nicRef, $txRef, $rxRef) = get_network_stats(\@before_nic, \@after_nic);
+        my ($sum_tx, $sum_rx) = get_network_totals(\@before_nic, \@after_nic);
+        print_log("TX = $sum_tx, RX = $sum_rx", 1);
+    
+    
+        # -- gather memory usage stats
+        open(MEM, "</proc/meminfo");
+        my %memory_hash;
+        while (<MEM>) {
+            chomp($_);
+            $_ =~ s/://g;
+            if ($_ !~ m/kB/) { next; }
+            my ($label, $value, $units) = split(/\s+/, $_);
+            $value = sprintf("%0.0f", $value / 1000);
+            $memory_hash{$label} = $value;
+        }
+        close(MEM);
+    
+        my $totalMem = $memory_hash{'MemTotal'} || 0.00001;
+        my $freeMem = $memory_hash{'MemFree'} || 0;
+        my $buffers = $memory_hash{'Buffers'} || 0;
+        my $cachedMem = $memory_hash{'Cached'} || 0;
+        my $totalSwap = $memory_hash{'SwapTotal'} || 0;
+        my $freeSwap = $memory_hash{'SwapFree'} || 0;
+        my $committed_as = $memory_hash{'Committed_AS'} || 0;
+    
+        my $usedSwap = $totalSwap - $freeSwap;
+        my $usedMem = $totalMem - ($freeMem + $buffers + $cachedMem);
+        my $usedMemPct = sprintf("%.1f", 100 * ($usedMem / $totalMem));
+    
+        my $shmsize = 0;
+        my $shmseg = 0;
+        my $shmsem = 0;
+
+        # -- shared memory
+        if (-e "/proc/sysvipc/shm") {
+            open(SHM, "</proc/sysvipc/shm");
+            while (<SHM>) {
+                if ($_ =~ m/size/) { next; }
+                chomp($_);
+                my @fields = split(/\s+/, $_);
+                $shmsize += $fields[4];
+                print_log("SHM ($fields[4]): $_", 2);
+                $shmseg++;
+            }
+            close(SHM);
+        }
+
+        # -- semaphores
+        if (-e "/proc/sysvipc/sem") {
+            open(SEM, "</proc/sysvipc/sem");
+            while (<SEM>) {
+                if ($_ =~ m/nsems/) { next; }
+                chomp($_);
+                my @fields = split(/\s+/, $_);
+                $shmsem += $fields[4];
+                print_log("SEM ($fields[4]): $_", 2);
+            }
+            close(SEM);
+        }
+
+        print_log("$freeMem / $totalMem Memory, $freeSwap / $totalSwap Swap", 2);
+
+        # Filesystem Consumption
+        my @filesystem_b = `df -x none -x tmpfs -x iso9660 -x gfs -l -P -T -m`;
+        my @filesystem_i = `df -x none -x tmpfs -x iso9660 -x gfs -l -i -P`;
+        my (@fsystems, @fpcts, @ffree, @ftotal, @parts, @ipcts, @ifree, @itotal, @devices, @partitions);
+        my $maxdisk = 0;
+        my $maxpart = 0;
+        my $maxpct = 0;
+        my $mountSQL = "";
+        for(my $i = 1; $i <= $#filesystem_i; $i++) {
+            chomp($filesystem_b[$i]);
+            chomp($filesystem_i[$i]);
+
+            my ($disk, $type, $blocks, $used, $available, $pct, $mount) = split(/\s+/, $filesystem_b[$i]);
+            my ($idisk, $inodes, $iused, $iavailable, $ipct, $imount) = split(/\s+/, $filesystem_i[$i]);
+
+            # -- not handling SAN drives for utilization tracking
+            if ($type eq "psfs") { next; }
+
+            # -- skip questionable data
+            if ($pct =~ m/-/ || $used =~ m/-/) { next; }
+    
+            my $partition = 1;
+            if ($disk =~ m/p[0-9]+$/) {
+                # Sun/HP style device
+                $partition = $disk;
+                $partition =~ s/^.*p//g;
+    
+                $disk =~ s/p[0-9]+$//g;
+            } elsif ($disk =~ m/hd/ || $disk =~ m/sd/) {
+                # sda/hda style device
+                $partition = $disk;
+                $partition =~ s/^.*[a-z]//g;
+    
+                $disk =~ s/[0-9]+$//g;
+            }
+            if ($partition eq "") { $partition = 1; }
+    
+            $pct =~ s/\%//g;
+            $ipct =~ s/\%//g;
+            if ($pct > $maxpct || $ipct > $maxpct) { 
+                $maxdisk = $disk; 
+                $maxpart = $partition;
+                $maxpct = ($ipct > $pct) ? $ipct : $pct;
+            }
+
+            if ($i == 1) { $mountSQL = "'$mount'"; } else { $mountSQL .= ", '$mount'"; }
+
+            push(@fsystems, $mount);
+            push(@fpcts, $pct);
+            push(@ftotal, $blocks);
+            push(@ffree, $available);
+            push(@parts, $type);
+            push(@itotal, $inodes);
+            push(@ipcts, $ipct);
+            push(@ifree, $iavailable);
+            push(@devices, $disk);
+            push(@partitions, $partition);
+
+        }
+
+        # try and harvest Temperatures, only works on select platforms (no ACPI support yet)
+        print_log(" - get sensor readings", 1);
+        my ($sensorRef, $maxtemp) = get_sensor_readings();
+        my @sensors = @{$sensorRef};
+
+
+
+        # -- retrieve a database connection
+        $dbh = get_db_connection($retries);
+    
+        # -- System Uptime
+        unless($BOOTED) {
+    
+            # -- we only need to calculate this and hit the database one time
+            $BOOTED = get_boot_time();
+            print_log(" - looking in DB for boot time near: $BOOTED", 1);
+    
+            $sql = "select booted from uptime where hostid = $hostid and booted > from_unixtime(unix_timestamp('$BOOTED') - 60) 
+                and booted < from_unixtime(unix_timestamp('$BOOTED') + 60)";
+            print_log("$sql", 2);
+            my $sth = $dbh->prepare($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+            $sth->execute() || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+            my @row = $sth->fetchrow();
+            if (defined($row[0])) { 
+                $BOOTED = $row[0]; 
+                print_log(" - booted value obtained from the database: $BOOTED", 1);
+            } else {
+                print_log(" - no uptime record in the database found, using calculated value: $BOOTED", 1);
+            }
+            $sth->finish();
+        }
+        my $uptime  = unix_timestamp(get_date()) - unix_timestamp($BOOTED);
+    
+    
+        # update our status
+        $dbh->do("replace delayed into daemon (hostid, name, updated, status, version) values 
+            ($hostid, '$NAME', now(), 'running', '$VERSION')") || print_log("ERROR updating status: " . $dbh->errstr, 0); 
+
+
+        # -- insert uptime information
+        $sql = "replace delayed into uptime (hostid, booted, updated, uptime) values ($hostid, '$BOOTED', '$UPDATED', $uptime)";
+        print_log("$sql", 2);
+        $dbh->do($sql) || print_log("ERROR adding uptime: " . $dbh->errstr, 0);
+    
+        # -- host information
+        my $macaddr = lookup_macaddr();        
+        $sql = "update node set procs = '$numProcs', uptime = '$uptime', sysload = '$totalLoad', numcpu = $num_cpu, 
+            temperature = '$maxtemp', maxdisk = '$maxdisk', maxpart = '$maxpart', memory = $usedMemPct, updated = '$UPDATED', 
+            cpu_type = '$cpu_type', os = '$os', arch = '$arch', alert = alert + $alert, ipaddr = '$ipaddr', 
+            macaddr = '$macaddr', hostname = '$hostname', bytesIn = '$kbIn', bytesOut = '$kbOut',
+            tx = '$sum_tx', rx = '$sum_rx' where hostid = '$serial'";
+        print_log("$sql", 2);
+        $dbh->do($sql) || print_log("ERROR updating node: " . $dbh->errstr, 0);
+
+        $xmlDoc->startTag('host', 'hostname' => $hostname, 'ipaddr' => $ipaddr, 'macaddr' => $macaddr, 'kernel' => $os,  
+            'uptime' => $uptime, 'numCPUs' => $num_cpu, 'typeCPU' => $cpu_type);
+        $xmlDoc->endTag();
+    
+        $sql = "replace delayed into sysload (hostid, updated, avg, procs, bi, bo, tx, rx, user, nice, 
+                system, idle, iowait, irq, softirq) values ($hostid, '$UPDATED', $totalLoad, $numProcs, 
+                $kbIn, $kbOut, $sum_tx, $sum_rx, $userTotal, $niceTotal,
+                $systemTotal, $idleTotal, $iowaitTotal, $irqTotal, $softirqTotal)";
+        $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+        print_log($sql, 2);
+
+        $xmlDoc->startTag('sysload', 'userCPU' => $userTotal, 'niceCPU' => $niceTotal, 'systemCPU' => $systemTotal, 'idleCPU' => $idleTotal, 
+            'iowaitCPU' => $iowaitTotal, 'irqCPU' => $irqTotal, 'softirqCPU' => $softirqTotal, 'numProcesses' => $numProcs, 
+            'kilobytesIn' => $kbIn, 'kilobytesOut' => $kbOut, 'kilobytesTx' => $sum_tx, 'kilobytesRx' => $sum_rx);
+        $xmlDoc->endTag();
+        
+        if ($totalLoad > get_profile_threshold($dbh, $profile_name, "maxload")) { 
+            $alert++; 
+            push(@alerts, "replace delayed into alert (hostid, type, updated, message) 
+                values ($hostid, 'maxload', '$UPDATED', 'System Load is $totalLoad%')");
+        }
+        if ($numProcs > get_profile_threshold($dbh, $profile_name, "maxprocs")) { 
+            $alert++; 
+            push(@alerts, "replace delayed into alert (hostid, type, updated, message) 
+                values ($hostid, 'maxprocs', '$UPDATED', 'Process count is $numProcs')");
+        }
+
+        # -- insert memory information
+        $sql = "replace delayed into memory (hostid, updated, used, free, cached, buffers, usedSwap, freeSwap, ";
+        $sql .= "committed_as, shmsize, shmseg, shmsem)";
+        $sql .= " values ('$hostid', '$UPDATED', '$usedMem', '$freeMem', '$cachedMem', '$buffers',";
+        $sql .= " '$usedSwap', '$freeSwap', '$committed_as', '$shmsize', '$shmseg', '$shmsem')";
+        $dbh->do($sql) || print_log("ERROR inserting memory: " . $dbh->errstr, 0);
+        print_log($sql, 2);
+
+        $xmlDoc->startTag('memory', 'used' => $usedMem, 'free' => $freeMem, 'cached' => $cachedMem, 'buffers' => $buffers, 'swapUsed' => $usedSwap, 'swapFree' => $freeSwap,
+            'committedAS' => $committed_as, 'shmTotal' => $shmsize, 'shmSegments' => $shmseg, 'semaphores' => $shmsem);
+        $xmlDoc->endTag();
+
+        if ($usedMemPct > get_profile_threshold($dbh, $profile_name, "maxmem")) { 
+            $alert++; 
+            push(@alerts, "replace delayed into alert (hostid, type, updated, message) 
+                values ($hostid, 'maxmem', '$UPDATED', '$usedMemPct\% of memory in use')");
+        } 
+
+
+    
+        # -- update filesystem information
+        $dbh->do("delete from filesystem where hostid = '$hostid' and mount not in ($mountSQL)") || 
+            print_log("ERROR deleting filesystems: " . $dbh->errstr, 0);
+
+        # -- load filesystem stats
+        $xmlDoc->startTag('filesystems');
+        $sql = "replace delayed into filesystem (hostid, updated, mount, svctime, pct, free, type, ipct, ifree, device, partition) values ";
+        for (my $i = 0; $i <= $#fsystems; $i++) {
+            my $serviceTime = $serviceTimes{$devices[$i]} || 0;
+            print_log(" - loading filesystem info for $fsystems[$i]", 1);
+            if ($i) { $sql .= ",\n"; }
+            $sql .= "('$hostid', '$UPDATED', '$fsystems[$i]', '$serviceTime', '$fpcts[$i]', ";
+            $sql .= "'$ffree[$i]', '$parts[$i]', '$ipcts[$i]', '$ifree[$i]', '$devices[$i]', '$partitions[$i]')";
+            if ($fpcts[$i] > get_profile_threshold($dbh, $profile_name, "maxdisk")) { 
+                $alert++; 
+                push(@alerts, "replace delayed into alert (hostid, type, updated, message) 
+                    values ($hostid, 'maxdisk', '$UPDATED', '$fsystems[$i] is at $fpcts[$i]% capacity')");
+            }
+            $xmlDoc->startTag('filesystem', 'mount' => $fsystems[$i], 'device' => $devices[$i], 'partition' => $partitions[$i],
+                'type' => $parts[$i], 'percentageBlocks' => $fpcts[$i], 'freeBlocks' => $ffree[$i],
+                'percentageInodes' => $ipcts[$i], 'inodesFree' => $ifree[$i]);
+            $xmlDoc->endTag();
+    
+        }
+        $xmlDoc->endTag();
+
+        if ($#fsystems >= 0) { 
+            print_log("Filesystems SQL: $sql", 2);
+            $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0); 
+        }
+
+        $sql = "replace delayed into diskload (hostid, device, updated, svctime, utilization, bi, bo) values ";
+        my @diskDevicesArray = keys(%diskDevices);
+        $xmlDoc->startTag('diskload');
+        for (my $i = 0; $i <= $#diskDevicesArray; $i++) {
+            my $diskDevice = $diskDevicesArray[$i];
+            print_log(" - loading diskload stats for: device $diskDevice", 1);
+            my $serviceTime = $serviceTimes{$diskDevice};
+            my $diskUtil = $diskUtilizations{$diskDevice};
+            my $readTotal = $readBytes{$diskDevice};
+            my $writeTotal = $writeBytes{$diskDevice};
+
+            if ($i) { $sql .= ",\n"; }
+            $sql .= "('$hostid', '$diskDevice', '$UPDATED', '$serviceTime', '$diskUtil', '$readTotal', '$writeTotal')";
+            print_log("   $diskDevice @ $serviceTimes{$diskDevice}s. (UTIL = $diskUtil, BI = $readTotal, BO = $writeTotal)", 1);
+
+            $xmlDoc->startTag('disk', 'device' => $diskDevice, 'serviceTime' => $serviceTime, 'utilization' => $diskUtil, 'readKb' => $readTotal, 'writeKb' => $writeTotal);
+            $xmlDoc->endTag();
+    
+        }
+        $xmlDoc->endTag();
+        if ($#diskDevicesArray >= 0) { 
+            print_log("Diskload SQL: $sql", 2);
+            $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0); 
+        }
+    
+
+        # -- load current nic stats 
+        $dbh->do("delete from nic where hostid = '$hostid'") || print_log("ERROR deleting nic entries: " . $dbh->errstr, 0);
+        my @nics = @{$nicRef};
+        my @txBytes = @{$txRef};
+        my @rxBytes = @{$rxRef};
+
+        $sql = "replace delayed into netload (hostid, device, vlan, updated, tx, rx) values "; 
+        $xmlDoc->startTag('netload');
+        my $nicSamples = 0;
+        for (my $i = 0; $i <= $#nics; $i++) {
+
+
+            my ($device, $vlan) = split(/\./, $nics[$i]);
+            my $tx = $txBytes[$i] || 0;
+            my $rx = $rxBytes[$i] || 0;
+
+            if (($tx + $rx) < 10) {
+                # -- don't database if there was very little or no traffic 
+                next;
+            }
+
+            if (!$vlan) { $vlan = 0; }
+            add_network_device($hostid, $device, $vlan);
+
+            print_log(" - network stats for $device/$vlan: $tx byte(s) TX, $rx byte(s) RX", 2);
+            if ($nicSamples) { $sql .= ",\n"; }
+            $sql .= "($hostid, '$device', $vlan, '$UPDATED', $tx, $rx)";
+            $xmlDoc->startTag('interface', 'device' => $device, 'vlan' => $vlan, 'txKb' => $tx, 'rxKb' => $rx);
+            $xmlDoc->endTag();
+            $nicSamples++;
+    
+        }
+        $xmlDoc->endTag();
+        if ($nicSamples > 0) {
+            print_log("Network Load: $sql", 2);
+            $dbh->do($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+        }
+
+
+        #-------------------------------------
+        # Load Sensor Data
+        #-------------------------------------
+        #### -- update sensors for the host
+        my $sensorSQL = "replace delayed into sensor_reading (hostid, updated, sensor_id, reading) values ";
+
+        $xmlDoc->startTag('sensors');
+        for (my $i = 0; $i <= $#sensors; $i++) {
+            my $sensorRef = $sensors[$i];
+            my %sensorHash = %{$sensorRef};
+            print_log(" - loading sensor: $sensorHash{label}, $sensorHash{reading}, $sensorHash{units}", 1);
+            $xmlDoc->startTag('sensor', 'label' => "$sensorHash{label}", 'reading' => $sensorHash{reading}, 'units' => $sensorHash{units});
+            $xmlDoc->endTag();
+
+            if (defined($globalSensorHash{$sensorHash{label}})) {
+                $sensorHash{id} = $globalSensorHash{$sensorHash{label}};
+            } else {
+                #### -- update sensors for the host
+                $sql = "insert into sensor (hostid, updated, label, units) values ('$hostid', '$UPDATED', ?, ?)";
+                my $sensorUpdate = $dbh->prepare($sql);
+
+                #### -- also obtain id for each sensor
+                $sql = "select id from sensor where hostid = '$hostid' and label = ?";
+                my $sensorLookup = $dbh->prepare($sql);
+
+                $sensorUpdate->execute($sensorHash{label}, $sensorHash{units}) || print_log("Sensor Update Error: " . $dbh->errstr, 2);
+                $sensorLookup->execute($sensorHash{label}) || print_log("Sensor Lookup Error ($sensorHash{label}): " . $dbh->errstr, 0);
+                my @row = $sensorLookup->fetchrow() || print_log("Sensor Lookup Results: " . $dbh->errstr, 0);
+                $sensorHash{id} = $row[0] || 0;
+                $globalSensorHash{$sensorHash{label}} = $row[0];
+    
+                $sensorUpdate->finish();
+                $sensorLookup->finish();
+            }
+
+            # -- if more than one sensor we need a comma
+            if ($i) { $sensorSQL .= ",\n"; }
+
+            # -- append another VALUES block
+            $sensorSQL .= "($hostid, '$UPDATED', " . $sensorHash{id} . ", " . $sensorHash{reading} . ")";
+
+            if ($sensorHash{units} eq "C") {
+                if ($sensorHash{reading} > get_profile_threshold($dbh, $profile_name, "maxtemp")) {
+                    $alert++; 
+                    push(@alerts, "replace delayed into alert (hostid, type, updated, message) 
+                        values ($hostid, 'maxtemp', '$UPDATED', '$sensorHash{label} temperature is $sensorHash{reading}&deg;C')");
+                }
+            }  
+        }
+        $xmlDoc->endTag('sensors');
+        print_log("Sensor SQL: $sensorSQL", 2);
+        if ($#sensors >= 0 and rand() <= $RANDOM) { $dbh->do($sensorSQL) || print_log("ERROR ($sensorSQL): " . $dbh->errstr, 0); }
+
+
+        # -- if logging processes
+        if ($LOGPROCS && rand() <= $RANDOM) {
+            $dbh->do("delete from process where hostid = $hostid") || print_log("ERROR logging procs: " . $dbh->errstr, 0);
+            my $pSql = "insert delayed into process (hostid, pid, ppid, user, cpu, mem, nice, prio, etime, stime, rsz, sz, vsz, cmd, args) values ";
+            $xmlDoc->startTag('processes');
+            # remember to skip first line (headers)
+            for (my $i = 1; $i <= $#procs; $i++) {
+                chomp(my $process = $procs[$i]);
+                $process =~ s/^\s+//g;
+                my ($pid, $ppid, $user, $cpuPct, $memPct, $nice, $prio, $etime, $stime, 
+                    $rsz, $sz, $vsz, $cmd, @args) = split(/\s+/, $process);
+
+                # -- (re)format some fields from the ps output as needed
+                my $argString = "";
+                foreach my $arg (@args) { $argString = "$argString$arg "; }
+                $argString =~ s/'/''/g;
+
+                $cmd =~ s/'/''/g;
+
+                $nice =~ s/^-$/0/g;
+
+                print_log("Inserting Process $pid (cmd=$cmd, args=$argString)", 2);
+                if ($i > 1) { $pSql .= ",\n"; }
+                $pSql .= "($hostid, '$pid', '$ppid', '$user', '$cpuPct', '$memPct', '$nice', '$prio', '$etime', '$stime', '$rsz', '$sz', '$vsz', '$cmd', '$argString')";
+                $xmlDoc->startTag('process', 'pid' => $pid, 'ppid' => $ppid, 'user' => $user, 'percentCPU' => $cpuPct, 'percentMem' => $memPct, 
+                    'nice' => $nice, 'priority' => $prio, 'elapsedTime' => $etime, 'startTime' => $stime, 'residentSetSize' => $rsz, 'swapCost' => $sz, 'virtualMemorySize' => $vsz, 'command' => $cmd, 'arguments' => $argString);
+                $xmlDoc->endTag();
+            }
+            $xmlDoc->endTag();
+            # remember that we skipped the first line (headers)
+            if ($#procs > 0) {
+                print_log("Procs: $pSql", 2);
+                $dbh->do($pSql) || print_log("ERROR ($pSql): " . $dbh->errstr, 0);
+            }
+        }
+
+
+
+        # -- insert any alerts we encountered
+        foreach my $alertSQL (@alerts) { 
+            $dbh->do($alertSQL) || print_log("ERROR adding alert: " . $dbh->errstr, 0); 
+            print_log("$alertSQL", 1);
+        }
+            
+        # -- periodically clear the threshold cache
+        if (rand() <= $RANDOM) {
+                print_log(" - clearing the profile threshold cache", 1);
+                clear_profile_threshold_cache();
+        }
+
+        # -- we're done...    
+        print_log("statistics loaded", 1);
+        $COUNT++;
+    
+        # -- close out our database statement-handle and connection
+        $dbh->disconnect();
+
+        # -- close report document node
+        $xmlDoc->endTag(); # </report>
+
+        if ($xmlReporting && ($COUNT % $xmlInterval == 0)) {
+
+            # -- wrap up the XML document
+            $xmlDoc->endTag(); # </reports>
+            $xmlDoc->endTag(); # </AWARE>
+            $xmlDoc->end();
+
+            my $thisDocument = $xml; 
+
+            # -- re-initialize the xml document object
+            initialize_xml();
+
+            if (lc($xmlDelivery) eq "post") {
+
+                # -- post XML to server
+                my $response = $userAgent->request(POST "$xmlURL", Content_Type => 'text/xml', Content => $thisDocument);
+                print_log($response->as_string, 2);
+                if ($response->is_error) {
+                    print_log("Error posting XML to: $xmlURL", 0);
+                    print_log($response->error_as_HTML, 0);
+                } else {
+                    print_log(" - posted XML to: $xmlURL", 1);
+                    print_log(" - XML content:\n$thisDocument\n", 2);
+                }
+
+            } else {
+
+                if (-d $xmlDirectory && -w $xmlDirectory) {
+
+                    # -- save XML to disk
+                    my $epoch = unix_timestamp(get_date());
+                    my $tmpfile = "$xmlDirectory/aware-$epoch-$$-$hostname.tmp";
+                    my $xmlfile = "$xmlDirectory/aware-$epoch-$$-$hostname.xml";
+                    open(XML, ">$tmpfile");
+                    print XML $thisDocument;
+                    close(XML);
+                    chmod(0664, $tmpfile);
+                    rename($tmpfile, $xmlfile);
+                    print_log(" - saved XML to: $xmlfile", 1);
+
+                } else {
+
+                    print_log("WARNING -- cannot save XML to: $xmlDirectory", 0);
+
+                }
+                
+            }
+
+        } elsif (!$xmlReporting) {
+
+            # -- maybe we do something else w/ this XML sometime
+            $xmlDoc->endTag(); # </reports>
+            $xmlDoc->endTag(); # </AWARE>
+            $xmlDoc->end();
+
+            # -- re-initialize the xml document object
+            initialize_xml();
+
+        }
+
+
+    }; # END EVAL    
+
+    if ($@) {
+
+        print_log("ERROR gathering/loading statistics: $@", 0);
+
+    }
+
+    # -- sleep until time for next run
+    sleep($SLEEP + ($SLEEP * rand()));
+
+}
+print_log("$NAME shutting down", 0);
+
+$dbh = get_db_connection();
+if (defined($dbh)) {
+    $dbh->do("replace delayed into daemon (hostid, name, updated, status, version) 
+        values ($hostid, '$NAME', '$UPDATED', 'shutdown signal received', '$VERSION')") || 
+        print_log("ERROR updating daemon: " . $dbh->errstr, 0); 
+    print_log("$NAME database status updated", 1);
+    $dbh->disconnect();
+}
+print_log("$NAME shutdown complete", 0);
+exit();
+
+
+##########################
+# AWARE_DAEMON Subroutines
+##########################
+
+sub get_host_id {
+
+    my ($dbh, $HOSTIDFILE, $hostname) = @_;
+
+    my $hostid;
+
+    # -- determine hostname & hostid
+    my $serial = "";
+    if (-e $HOSTIDFILE) {
+        open(HOSTID, "<$HOSTIDFILE");
+        # -- we are really only expecting one line from this file
+        while(<HOSTID>) { $serial .= $_; }
+        close(HOSTID);
+        chomp($serial);     
+    }
+    $serial =~ s/\s//g;
+
+    # If node is not in database attempt to add it
+    my $sth = $dbh->prepare("select a.id, b.name, b.id from node a, profile b where a.hostid = '$serial' and a.profile_id = b.id");
+    if (!$sth->execute()) { print_log("Error: " . $dbh->errstr); }
+    my @row = $sth->fetchrow();
+    $hostid = $row[0] || 0;
+    $profile_name = $row[1];
+    $profile_id = $row[2];
+    if (!$hostid) { 
+        $profile_id = 0;
+
+        my $sql = "insert into node (hostid, idx, profile_id, online, port) values ('$serial', -1, $profile_id, 1, 'tcp:22')";
+        my $sth = $dbh->prepare($sql) || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+        $sth->execute() || print_log("ERROR ($sql): " . $dbh->errstr, 0);
+        $hostid = $sth->{'mysql_insertid'};
+        if (!$hostid) {
+            print_log("Error: unable to determine hostid ($hostname)", 0);
+            $hostid = 0;
+        }
+        $sth->finish();
+    }
+    print_log(" - my hostid is $hostid", 2);
+    $sth->finish();
+
+    return($hostid, $serial);
+            
+}
+
+
+
+sub get_network_totals {
+
+    my ($beforeRef, $afterRef) = @_;
+
+    my @before_nic = @{$beforeRef};
+    my @after_nic = @{$afterRef};
+
+    my $sum_tx = 0;
+    my $sum_rx = 0;
+
+    for (my $i = 2; $i <= $#before_nic; $i++) {
+
+        if ($before_nic[$i] =~ m/\./) {
+            # -- this is a VLAN interface, we want the device totals (which includes vlan traffic anyways)
+            next;
+        }
+    
+        $after_nic[$i] =~ s/:/ /g;
+        $after_nic[$i] =~ s/^\s+//g;
+        $before_nic[$i] =~ s/:/ /g;
+        $before_nic[$i] =~ s/^\s+//g;
+    
+        my (@fields_b) = split(/\s+/, $before_nic[$i]);
+        my (@fields_a) = split(/\s+/, $after_nic[$i]);
+    
+        $sum_tx += ($fields_a[9] - $fields_b[9]) / $WINDOW;
+        $sum_rx += ($fields_a[1] - $fields_b[1]) / $WINDOW;
+        
+    }
+
+    return ($sum_tx, $sum_rx);
+}
+
+
+
+sub get_network_stats {
+
+    my ($beforeRef, $afterRef) = @_;
+
+    my @before_nic = @{$beforeRef};
+    my @after_nic = @{$afterRef};
+
+    my @nics = ();
+    my @tx = ();
+    my @rx = ();
+
+    for (my $i = 2; $i <= $#before_nic; $i++) {
+
+        my $nic = $before_nic[$i];
+        $nic =~ s/^\s+//g;
+        $nic =~ s/:.*//g;
+        chomp($nic);
+    
+        $after_nic[$i] =~ s/:/ /g;
+        $after_nic[$i] =~ s/^\s+//g;
+        $before_nic[$i] =~ s/:/ /g;
+        $before_nic[$i] =~ s/^\s+//g;
+    
+        my (@fields_b) = split(/\s+/, $before_nic[$i]);
+        my (@fields_a) = split(/\s+/, $after_nic[$i]);
+
+        push(@nics, $nic);
+        push(@tx, ($fields_a[9] - $fields_b[9]) / $WINDOW);
+        push(@rx, ($fields_a[1] - $fields_b[1]) / $WINDOW);
+
+    }
+
+    return (\@nics, \@tx, \@rx);
+}
+
+
+
+sub add_network_device {
+
+    my ($hostid, $device, $vlan) = @_;
+
+    my $deviceName = $device;
+    if ($vlan) { $deviceName = "$device.$vlan"; }
+
+    my @ifconfig = `/sbin/ifconfig $deviceName`;
+
+    my $macaddr = '';
+    if ($ifconfig[0] =~ m/HWaddr/) {
+        $macaddr = $ifconfig[0];
+        $macaddr =~ s/.*HWaddr //g;
+        chomp($macaddr);
+    }
+
+    my $ipaddr = '';
+    if ($ifconfig[1] =~ m/inet addr/) {
+        $ipaddr = $ifconfig[1];
+        $ipaddr =~ s/.*inet addr://g;
+        $ipaddr =~ s/ .*//g;
+        chomp($ipaddr);
+    }
+
+    my $netmask = '';
+    if ($ifconfig[1] =~ m/Mask/) {
+        $netmask = $ifconfig[1];       
+        $netmask =~ s/.*Mask://g;
+        chomp($netmask);
+     }
+
+    my $sql = "replace delayed into nic (hostid, device, vlan, updated, macaddr, ipaddr, netmask) 
+                values ($hostid, '$device', $vlan, '$UPDATED', '$macaddr', '$ipaddr', '$netmask')";
+    $dbh->do($sql) || print_log("SQL ERROR ($sql): " . $dbh->errstr, 0);
+    print_log($sql, 2);
+}
+
+
+
+sub get_disk_stats {
+
+    my ($beforeRef, $afterRef) = @_;
+
+    my @before_diskio = @{$beforeRef};
+    my @after_diskio = @{$afterRef};
+    @smartDiskDevices = ();
+
+    # -- disk information files / 2.4 Kernel
+    my $disk_statsfile = "/proc/partitions";
+    my $dsoffset = 3;
+    my $inIdx = 6;
+    my $inpIdx = 6;
+    my $outIdx = 10;
+    my $outpIdx = 10;
+    my $last_dcolumn = 14;
+    
+    # -- disk information files / 2.6 Kernel 
+    if (-e "/proc/diskstats") { 
+        $disk_statsfile = "/proc/diskstats"; 
+        $inIdx = 5;
+        $outIdx = 9;
+        $inpIdx = 4;
+        $outpIdx = 6;
+        $last_dcolumn = 6;
+        $dsoffset--;
+    }
+
+    # -- build a lookup table of major/minor devices
+    my %mmTable;
+    my @devEntries = `/bin/ls -l /dev/ /dev/mapper`;
+    foreach my $devEntry (@devEntries) {
+        # -- disregard symbolic links
+        if ($devEntry =~ m/lr/) { next; }
+
+        # -- disregard items that lack commas
+        if ($devEntry !~ m/,/) { next; }
+
+        # -- now strip commas
+        $devEntry =~ s/,//g;
+
+        chomp($devEntry);
+        my (@fields) = split(/\s+/, $devEntry);
+
+        my $major = $fields[4];
+        my $minor = $fields[5];
+        my $device = $fields[$#fields];
+        $mmTable{"$major.$minor"} = $device;
+        print_log(" - adding $major.$minor == $device to lookup table", 2);
+
+    }
+
+
+    # -- check for software RAID
+    my %raidDevices;
+    my %raids;
+    if (-e "/proc/mdstat") {
+        print_log("Looking for software RAID devices in /proc/mdstat", 1);
+        open(MDSTAT, "</proc/mdstat");
+        while (<MDSTAT>) {
+            if ($_ =~ m/^md/) {
+                chomp(my $raidConfig = $_);
+                my ($raid, $colon, $status, $level, @partitions) = split(/ /, $raidConfig);
+                print_log(" - found $status software RAID $raid ($level)", 1); 
+                $raids{$raid} = $#partitions + 1;
+                foreach my $partition (@partitions) {
+                    $partition =~ s/\[.*$//g;
+                    my $device = $partition;
+                    $device =~ s/[0-9]+$//g;
+                    print_log("   adding [device $device / partition $partition] to $raid configuration", 1);
+                    $raidDevices{"/dev/$device"} = $raid;
+                }
+            }
+        }
+    }
+
+    # -- check for LVM/devicemapper devices
+    my %dmDevices;
+    my %dms;
+    my %dm2label;
+    my @dminfos = `dmsetup ls 2>/dev/null`;
+    my $dmCount = 0;
+    foreach my $dminfo (@dminfos) {
+        chomp($dminfo);
+        $dminfo =~ s/[\(\),]//g;
+        my ($dmName, $major, $minor) = split(/\s+/, $dminfo);
+        $dm2label{"dm-$dmCount"} = $dmName;
+        $dms{$dmName} = 0;
+        print_log("Discovered DM device: $dmName", 1);
+        my $deps = `dmsetup deps $dmName`;
+        chomp($deps);
+        $deps =~ s/^.*: //g;
+        $deps =~ s/\s+//g;
+        $deps =~ s/\)\(/;/g;
+        $deps =~ s/\(//g;
+        $deps =~ s/\)//g;
+        print_log(" $dmName: $deps", 1);
+        my @pairs = split(/;/, $deps);
+        foreach my $pair (@pairs) {
+            my ($major, $minor) = split(/,/, $pair);
+            my $diskDevice = $mmTable{"$major.$minor"};
+            print_log(" $dmName member: $major,$minor => $diskDevice", 1);
+            $dmDevices{$diskDevice} = $dmName;
+            $dms{$dmName} = $dms{$dmName} + 1;
+        }
+            
+        $dmCount++;
+    }
+    
+
+    my $kbIn = 0;
+    my $kbOut = 0;
+    
+    my (%devices, %readBytes, %writeBytes, %diskUtilizations, %serviceTimes);
+
+    for (my $i = 2; $i <= $#before_diskio; $i++) {
+        chomp($before_diskio[$i]);
+        chomp($after_diskio[$i]);
+
+        $before_diskio[$i] =~ s/^\s+//g;
+        $after_diskio[$i] =~ s/^\s+//g;
+
+    
+        my (@a) = split(/\s+/, $after_diskio[$i]);
+        my (@b) = split(/\s+/, $before_diskio[$i]);
+    
+        my $device = $a[$dsoffset];
+        
+        print_log("Found device: $device", 2);
+    
+        # -- skip ram devices, loop devices, GFS devices, and devices w/ insufficent # of fields
+        if ($device =~ m/^loop/ || $device =~ m/^ram/ || $device =~ m/GFS/ || $#b < 5) { 
+            print_log(" - skipping device: $device", 2);
+            next; 
+        }
+
+        my $disk = "/dev/$device";
+        my $partition = $b[1] % 16;
+        if ($device =~ m/^dm-/) {
+            if (!defined($dm2label{$device})) { next; }
+            # -- this is a device-mapper device so this logic doesn't work the same
+            $disk = "/dev/mapper/" . $dm2label{$device};
+            print_log("Found LVM/DM Device: $disk ($device)", 1);
+            $partition = 0;
+            $device = $disk;
+        } elsif ($device =~ m/^md/) {
+            # -- this is a software RAID device so it is both a device and a partition for our purposes
+            $partition = 0;
+            $device = "/dev/$device";
+        } else {
+            $device = "/dev/$device";
+        }
+                
+        if ($partition) {
+            # -- we don't use per-partition statistics
+            next;
+        }
+    
+
+        # -- this is a disk
+        print_log(" - found disk: $disk", 1);
+
+        # -- compute read and write totals
+        my $deviceIn = (($a[$inIdx] - $b[$inIdx]) / $WINDOW) / 2;
+        print_log("$device == (($a[$inIdx] - $b[$inIdx]) / $WINDOW == $deviceIn", 2);
+        my $deviceOut = (($a[$outIdx] - $b[$outIdx]) / $WINDOW) / 2;
+        print_log("$device == (($a[$outIdx] - $b[$outIdx]) / $WINDOW == $deviceOut", 2);
+
+        # -- don't load stats if there was no I/O during this sample window
+        if (!$deviceIn && !$deviceOut) { next; }
+        print_log(" - I/O for $device: bytesIn == $deviceIn, bytesOut == $deviceOut", 1);
+
+        # -- don't add RAID/LVM/DM totals since we get those from the component devices
+        if ($device !~ m/^\/dev\/mapper\// && $device !~ m/^\/dev\/md/) { 
+            $kbOut += $deviceOut; 
+            $kbIn += $deviceIn;
+            push(@smartDiskDevices, $device);
+        }
+       
+
+        # -- compute utilization and service times
+        my $rio = ($a[$dsoffset + 1] - $b[$dsoffset + 1]) / $WINDOW;
+        my $wio = ($a[$dsoffset + 5] - $b[$dsoffset + 5]) / $WINDOW;
+        my $use = ($a[$dsoffset + 10] - $b[$dsoffset + 10]) / $WINDOW;
+            
+        my $utilization = sprintf("%.0f", $use / 10);
+        my $svcTime = "0.0";
+        if ($rio || $wio) { $svcTime = sprintf("%.2f", $use / ($rio + $wio)); }
+
+        print_log(" - svctime for $device: $svcTime", 1);
+        print_log(" - utilization for $device: $utilization%", 1);
+
+        $devices{$device} = 1;
+        $serviceTimes{$device} = $svcTime;
+        $diskUtilizations{$device} = $utilization;
+        $readBytes{$device} = $deviceIn;
+        $writeBytes{$device} = $deviceOut;
+
+    }
+
+    print_log(" I/O totals: kbIn == $kbIn, kbOut == $kbOut", 1);
+    return($kbIn, $kbOut, \%devices, \%serviceTimes, \%readBytes, \%writeBytes, \%diskUtilizations);
+
+}
+
+
+
+# ---------------------------------------------------------------------------------------
+#
+# get_sensor_readings()
+#
+# - this function will return a reference to a sensors array 
+#   each entry in the array will consist of a perl hash 
+#   with entries:  units, reading, label
+#   
+#   for example:
+#        units   => C
+#        label   => CPU1
+#        reading => 44
+#   
+# ---------------------------------------------------------------------------------------
+
+sub get_sensor_readings {
+  
+    my @sensors;     
+    my $maxtemp = 0;
+
+    # -- if sensors are hanging on us don't keep trying to access them
+    if ($HUNGSENSORS) { return \@sensors, $maxtemp; }
+
+    eval {
+        local $SIG{ALRM} = sub { die "alarm\\n"; };
+        alarm $TIMEOUT;
+    
+        if (-e "/proc/cpqtemp") {
+            # HP Equipment with CPQ Health RPM
+            my @temp_readings =  `cat /proc/cpqtemp`;
+            foreach my $temp (@temp_readings) {
+                my %reading;
+                my $str = $temp;
+                $temp =~ s/^.*([0-9][0-9])C.*[0-9][0-9].*/$1/;
+                chomp($temp);
+                $reading{label} = $str;
+                $reading{reading} = $temp;
+                $reading{units} = "C";
+                print_log("Adding Sensor Reading: $str => $temp C", 1);
+                push(@sensors, \%reading);
+                if ($temp > $maxtemp) { $maxtemp = $temp; }
+            }
+        } elsif (-e "/sbin/hpasmcli") {
+            my @temp_readings = `/sbin/hpasmcli -s \"show temp\"`;
+    
+            # -- example output
+            # --------------------------------------------------------------------
+            # Sensor   Location              Temp       Threshold
+            # ------   --------              ----       ---------
+            # #0        SYSTEM_BD             -          -
+            # #1        I/O_ZONE             43C/109F   65C/149F
+            # #2        AMBIENT              17C/62F    40C/104F
+            # #3        CPU#1                30C/86F    95C/203F
+            # --------------------------------------------------------------------
+    
+    
+            # -- example output (G6 Server / Fall 2009)
+            # Sensor   Location              Temp       Threshold
+            # ------   --------              ----       ---------
+            # #1        AMBIENT              21C/69F    42C/107F
+            # #2        CPU#1                40C/104F   82C/179F
+            # #3        CPU#2                40C/104F   82C/179F
+            # #4        MEMORY_BD            36C/96F    87C/188F
+            # #5        MEMORY_BD            36C/96F    78C/172F
+            # #6        MEMORY_BD            37C/98F    87C/188F
+            # #7        MEMORY_BD            34C/93F    78C/172F
+            # #8        MEMORY_BD            38C/100F   87C/188F
+            # #9        MEMORY_BD            35C/95F    78C/172F
+            # #10       MEMORY_BD            38C/100F   87C/188F
+            # #11       MEMORY_BD            35C/95F    78C/172F
+            # #12       POWER_SUPPLY_BAY     36C/96F    59C/138F
+            # #13       POWER_SUPPLY_BAY     50C/122F   73C/163F
+            # #14       MEMORY_BD            29C/84F    72C/161F
+            # #15       PROCESSOR_ZONE       33C/91F    73C/163F
+            # #16       PROCESSOR_ZONE       33C/91F    64C/147F
+            # #17       MEMORY_BD            31C/87F    63C/145F
+            # #18       PROCESSOR_ZONE       45C/113F   69C/156F
+            # #19       SYSTEM_BD            39C/102F   69C/156F
+            # #20       SYSTEM_BD            37C/98F    71C/159F
+            # #21       SYSTEM_BD            43C/109F   65C/149F
+            # #22       SYSTEM_BD            40C/104F   71C/159F
+            # #23       SYSTEM_BD            43C/109F   69C/156F
+            # #24       SYSTEM_BD            53C/127F   69C/156F
+            # #25       SYSTEM_BD            40C/104F   63C/145F
+            # #26       SYSTEM_BD            54C/129F   66C/150F
+            # #27       SCSI_BACKPLANE_ZONE  12C/53F    60C/140F
+            # #28       SYSTEM_BD            88C/190F   110C/230F
+    
+    
+            my %sensorsFound;
+            foreach my $temp (@temp_readings) {
+                chomp($temp);
+                my %reading;
+                $temp =~ s/\s+/ /g;
+                my ($counter, $label, $reading, undef) = split(/\s/, $temp);
+                $temp =~ s/^.*[\t ]([0-9]+)C.*[0-9]+C.*/$1/;
+    
+                if (!defined($label)) { next; }
+                if (!defined($counter)) { $counter = ""; }
+                
+                $label = "$label-$counter";    
+    
+                if ($temp =~ m/^[0-9]+$/) {
+                    $reading{label} = $label;
+                    $reading{reading} = $temp;
+                    $reading{units} = "C";
+                    print_log("Adding Sensor Reading: $label => $temp C", 1);
+                    push(@sensors, \%reading);
+                    if ($temp > $maxtemp) { $maxtemp = $temp; }
+                }
+            }
+    
+        } elsif (-e "/usr/bin/omreport") {
+            # On Dell Equipment
+            my @temps = `omreport chassis temps -fmt ssv | grep CPU`;
+            my $scount = 1;
+            foreach my $temp (@temps) {
+                my %reading;
+                my (@fields) = split(/;/,$temp);
+                $fields[3] =~ s/\s.*//g;
+                $temp = $fields[3];
+                $reading{label} = $scount;
+                $reading{reading} = $temp;
+                $reading{units} = "C";
+                print_log("Adding Sensor Reading: $scount => $temp C", 1);
+                push(@sensors, \%reading);
+                if ($temp > $maxtemp) { $maxtemp = $temp; }
+                $scount++;
+            }
+        }
+    
+        if (-e "/usr/bin/sensors") {
+            print_log(" - get LM_Sensor Readings", 1);
+            my @lmsensors = `sensors 2>/dev/null`;
+            foreach my $sensorOutput (@lmsensors) {
+                chomp($sensorOutput);
+                if ($sensorOutput !~ m/:.*\(.*\)/) {
+                    print_log(" - not a sensor reading: $sensorOutput", 1);
+                    next;
+                }
+                my %reading;
+                
+                # -- sometimes we get some binary characters in here like the degrees symbol
+                $sensorOutput =~ s/\xb0/ /g;
+                $sensorOutput =~ s/\xc2/ /g;
+    
+                my ($sensor, $information) = split(/:/, $sensorOutput);
+                $information =~ s/\s+\(.*$//g;
+                $information =~ s/\+//g;
+                $information =~ s/^\s+//g;
+                my ($reading, $units) = split(/\s/, $information);
+    
+                # -- some sanity-checking
+                if ($reading =~ m/^-/) { next; }
+                if (!defined($units)) { next; }
+                if ($units eq "") { $units = "C"; }
+    
+                # -- got a reasonable set of values
+                $reading{label} = $sensor;
+                $reading{reading} = $reading;
+                $reading{units} = $units;
+                print_log(" - obtained LM_Sensors reading: $sensor, $reading, $units ($information)", 2);
+                push(@sensors, \%reading);
+                if ($units eq "C" && $reading > $maxtemp) { $maxtemp = $reading; }
+            }
+        } 
+    
+        if (-e "/usr/sbin/smartctl") {
+            print_log(" - found smartctl", 1);
+            print_log(" - smartDisks available == $#smartDiskDevices", 1);
+            foreach my $diskDevice (@smartDiskDevices) {
+                # -- each disk gets a reading hash
+                my %reading;
+                $reading{units} = "C";
+                
+                # -- create a "friendly" shorter name for the disk that we will use in the label
+                my $diskName = $diskDevice;
+                $diskName =~ s/\/dev\///g;
+    
+                # -- some of these might not lead to valid sensor readings so try and determine that per-disk
+                my $goodReading = 0;
+    
+                # -- run smartctl against the drive
+                print_log(" - running smartctl for: $diskDevice", 1);
+                my @smartCTL = `/usr/sbin/smartctl -a $diskDevice`;
+                foreach my $smartOutput (@smartCTL) {
+                    chomp($smartOutput);
+                    print_log(" - smartctl output: $smartOutput", 2);
+                    if ($smartOutput =~ m/^Device Model:/) {
+                        my $label = $smartOutput;
+                        $label =~ s/^Device Model://g;
+                        $label =~ s/^\s+//g;
+                        $label =~ s/^\t+//g;
+                        $reading{label} = "$label ($diskName)";
+                        $goodReading++;
+                    }
+                    if ($smartOutput =~ m/^194 Temperature_Celsius/) {
+                        my @fields = split(/\s+/, $smartOutput);
+                        $reading{reading} = $fields[9];
+                        $goodReading++;
+                        if ($fields[9] > $maxtemp) { $maxtemp = $fields[9]; }
+                    }
+                }
+
+                if ($goodReading >= 2) {
+                    print_log(" - smartctl result for $diskName: $reading{label}, $reading{reading}, $reading{units} (field matches == $goodReading)", 1);
+                    push(@sensors, \%reading);
+                }
+
+            }
+
+        }
+
+        alarm 0;
+    };
+
+    if ($@) {
+        print_log("WARNING: timed out checking sensors", 0);
+        $HUNGSENSORS = 1;
+    }
+
+    my $numSensors = $#sensors + 1;
+    print_log(" - finished reading sensors (found $numSensors)", 1);
+
+    foreach my $sensorRef (@sensors) {
+        my %sensor = %{$sensorRef};
+        print_log(" - found sensor: reading==$sensor{reading}, units==$sensor{units}, label==$sensor{label}", 1);
+    }
+
+
+    return \@sensors, $maxtemp;
+
+}
+
+# ---------------------------------------------------------------------------------------
+#
+# initialize_xml()
+#
+# - this function will initialize the xml document object used to report statistics
+# the xml and xmlDoc objects are GLOBALS :-(
+# ---------------------------------------------------------------------------------------
+
+sub initialize_xml {
+
+    undef $xml;
+    undef $xmlDoc;
+
+    my $xmlDate = get_date();
+    $xmlDate =~ s/ /T/g;
+
+    $xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+    $xmlDoc = XML::Writer->new(OUTPUT => \$xml, DATA_MODE => 1, DATA_INDENT => 2);
+
+    # -- document header
+    $xmlDoc->startTag('it:AWARE',
+        'schemaVersion' => "1.0",
+        'xmlns:it' => "http://myurl");
+
+    $xmlDoc->startTag('reports');
+
+    return(\$xml, \$xmlDoc);
+
+}
+
+# ---------------------------------------------------------------------------------------
+#
+# lookup_macaddr()
+#
+# - this function will find and return the "first" mac address on the system
+#
+# ---------------------------------------------------------------------------------------
+
+sub lookup_macaddr {
+
+    my $macaddr = "00:00:00:00:00:00";
+    my @ifconfig = `/sbin/ifconfig -a`;
+    if ($#ifconfig >= 0) {
+        $macaddr = $ifconfig[0];
+        chomp($macaddr);
+        $macaddr =~ s/^.*HWaddr //g;
+        $macaddr =~ s/\s+//g;
+    }
+    return $macaddr;
+}

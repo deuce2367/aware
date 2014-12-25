@@ -1,0 +1,81 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $duration = shift || 1;
+my $window = shift || 1;
+
+for (my $i = 0; $i < $duration; $i++) {
+	my @before = ();
+	open (STAT, "</proc/net/dev");
+	while (<STAT>) { push(@before, $_); }
+	close(STAT);
+
+	sleep(1 * $window);
+	my @after = ();
+	open (STAT, "</proc/net/dev");
+	while (<STAT>) { push(@after, $_); }
+	close(STAT);
+
+	chomp($before[0]);
+	chomp($after[0]);
+
+	print "----------------------[ " . localtime() . " ]-----------------------\n";
+	for (my $i = 2; $i <= $#before; $i++) {
+
+		$after[$i] =~ s/:/ /g;
+		$after[$i] =~ s/^\s+//g;
+		$before[$i] =~ s/:/ /g;
+		$before[$i] =~ s/^\s+//g;
+
+		my (@fields_b) = split(/\s+/, $before[$i]);
+		my (@fields_a) = split(/\s+/, $after[$i]);
+
+		my $device = rspacepad("$fields_a[0]:", 12);
+
+		my $diff_tx = comma_format(($fields_a[9] - $fields_b[9]));
+		my $diff_rx = comma_format(($fields_a[1] - $fields_b[1]));
+
+		$diff_tx = rspacepad("$diff_tx bytes", 20);
+		$diff_rx = rspacepad("$diff_rx bytes", 20);
+		print "$device TX = $diff_tx, RX = $diff_rx\n";
+	
+	}
+	print "\n";
+}
+
+
+sub rspacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = " $string"; }
+	return $string;
+}
+
+sub spacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = "$string "; }
+	return $string;
+}
+
+sub comma_format {
+
+        my ($number) = @_;
+        my $decimal = "";
+
+        if ($number =~ m/\./) {
+                $decimal =~ s/^.*\.//g;
+                $number =~ s/\..*$//g;
+        }
+
+        my @array = ();
+
+        while ($number =~ /\d\d\d\d/) {
+
+                $number =~ s/(\d\d\d)$//;
+                unshift(@array, $1);
+        }
+        unshift(@array, $number);
+        $number = join(",", @array);
+        $number = "$number\.$decimal" if $decimal =~ /\d/;
+        return $number;
+}

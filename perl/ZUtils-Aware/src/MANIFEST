@@ -1,0 +1,6 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+t/ZUtils-Aware.t
+lib/ZUtils/Aware.pm

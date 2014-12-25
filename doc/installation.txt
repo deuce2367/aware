@@ -1,0 +1,440 @@
+# ------------------------------------------------------------------------------------------
+# $Id: installation.txt,v 1.12 2007-11-25 19:47:07 aps1 Exp $
+# $RCSfile: installation.txt,v $
+# $Revision: 1.12 $
+# $Date: 2007-11-25 19:47:07 $
+# $Author: aps1 $
+# $Name: not supported by cvs2svn $
+# ------------------------------------------------------------------------------------------
+
+
+          AWARE Installation and Configuration Guide -- Release 010 
+
+
+I. INTRODUCTION
+
+AWARE is a comprehensive systems monitoring software package that offers excellent
+visibility into the health and status of monitored linux systems.  AWARE monitors
+CPU utilization, memory usage, uptime, disk I/O, disk consumption, network traffic,
+runtime process statistics and temperature levels (on supported hardware).  AWARE
+is a computationally inexpensive solution that induces minimal load on monitored
+systems.  The central database and web components of AWARE are likewise efficient,
+so much so that an exclusive dedicated server is usually unnecessary.    
+
+The AWARE systems monitoring software consists of three main components:
+
+Server Components (installed in one location):
+
+	1) A central database (MySQL 3.x, 4.x and 5.x are supported)
+
+	2) A central web-based user interface
+
+Client Component (installed on each monitored system):
+
+	3) A perl client daemon that runs on each monitored system
+
+NOTE: the database and web components do not have to reside on the same machine.
+
+
+
+II. DATABASE INSTALLATION
+
+The MySQL database server should be installed on a centrally accessible machine.
+MySQL 5.x is now *required* for AWARE.  AWARE has been specifically tested
+with MySQL 5.0.45 and this version or newer is recommended.  Source RPMs for
+this version of MySQL are made available with AWARE and should be built and
+installed for your database host machine if necessary.  Note that older
+MySQL clients will work correctly in most circumstances -- they do NOT need
+to be upgraded.  You may need to use the 'old_magicwords=1' value in your
+my.cnf file to work correctly with older MySQL clients.  See your MySQL
+documentation for more information.
+
+The source RPM for MySQL is included in the aware-source RPM.  Install
+this package first if you need source RPMs for MySQL or any of the other
+AWARE prerequisites.
+
+  # Source RPM Package Installation
+  rpm -ivh /opt/aware/other/mysql-5.0.45-4.src.rpm
+
+  # Build Binary RPM for your platform/distribution
+  cd /usr/src/redhat/SPEC
+  rpmbuild -bb mysql.spec
+
+  # If errors are encountered, you may need to modify mysql.spec to 
+  #   match local versions of software/compilers/etc
+
+  # Install/Upgrade the MySQL RPM packages from /usr/src/redhat/RPMS/i386
+  rpm -Uvh /usr/src/redhat/RPMS/mysql-*
+
+  # Enable the mysqld service
+  /sbin/chkconfig mysqld on
+
+  # Start the database
+  /sbin/service mysqld start
+
+NOTE:  If installing the MySQL server from source tarballs please follow the 
+vendor instructions to set up the MySQL server as a service that will be started 
+at system boot.  For more information on this topic please see the MySQL 
+documentation or visit their website at http://www.mysql.com on the internet.
+
+
+ 
+III. ZUtils, GD LIBRARY, PERL MODULES, AND OTHER PREREQUISITES
+
+WARNING: this is usually the most painful part of the AWARE installation... :-)
+
+In addition to perl 5.x, the AWARE server component requires a recent version of the
+GD graphics library and some additional perl modules.  RPM source packages for these
+prerequisites is included with AWARE in the /opt/aware/other directory.  These
+files are part of the aware-source RPM and can be installed before the other 
+AWARE RPMs if necessary to satisfy dependencies.
+
+NOTE: these packages are only required on the main server.
+
+
+These packages can be installed using steps like below:
+
+
+  # 1) the ZUtils perl modules - these should be built for the local platform
+  # --------------------------------------------------------------------------------
+  rpm -ivh perl-ZUtils-Common-1.40-1.src.rpm
+  rpmbuild -ba /usr/src/redhat/SPECS/perl-ZUtils-Common.spec
+  rpm -ivh /usr/src/redhat/RPMS/i386/perl-ZUtils-Common-1.40.i386.rpm
+
+  rpm -ivh perl-ZUtils-Aware-1.25-1.src.rpm
+  rpmbuild -ba /usr/src/redhat/SPECS/perl-ZUtils-Aware.spec
+  rpm -ivh /usr/src/redhat/RPMS/i386/perl-ZUtils-Aware-1.25.i386.rpm
+
+  # 2) the gd C library (2.x version required) will need to be updated in many cases
+  # --------------------------------------------------------------------------------
+  rpm -ivh gd-2.0.33-1.src.rpm
+  rpmbuild -ba /usr/src/redhat/SPECS/gd233.spec
+  rpm -ivh /usr/src/redhat/RPMS/i386/gd-2.0.33.rpm
+  rpm -ivh /usr/src/redhat/RPMS/i386/gd-devel-2.0.33.rpm
+
+
+  # 3) modules that will probably need to be built and installed 
+  # --------------------------------------------------------------------------------
+  # perl-GD-Graph is a perl module that is not included in most linux distributions
+  # perl-GD-Graph3d is a perl module that is not included in most linux distributions
+  # perl-GD-TextUtil is a perl module that is not included in most linux distributions
+
+
+  # 4) commonly available modules that may or may not be present
+  # --------------------------------------------------------------------------------
+  # perl-GD is a perl module that is not included in most linux distributions
+  # perl-Bit-Vector is a perl module that may or may not be present
+  # perl-Date-Calc is a perl module that may or may not be present
+  # perl-Time-HiRes is a perl module that may or may not be present
+
+
+  # 5) extremely common modules likely to be present already
+  # --------------------------------------------------------------------------------
+  # perl-DBI is a perl module that is present in most installations
+  # perl-DBD-MySQL is a perl module that is present in most installations
+
+
+  If you are missing any of these packages you can build and install them using
+  the same basic steps:
+
+    a. rpm -ivh /opt/aware/other/[SRC-RPM-PACKAGE]
+    b. rpmbuild -ba /usr/src/redhat/SPECS/[SPECFILE]
+    c. rpm -ivh /usr/src/redhat/RPMS/i386/[RPM-FILE]
+
+  It is usually a good idea to install RPM files marked '-devel' for packages that 
+  you have built.  RPM files marked '-debuginfo' are usually not necessary.
+
+These packages have some additional prerequisites that are available on nearly all
+linux installations.  Examples include the JPEG, PNG, ZLib and FreeType2 libraries.
+You will need to install these prerequisites ONLY IF they are not present on your
+machine.  Please obtain these from your installation media or system administrator.
+
+Seeming circular dependencies between some of these packages may be encountered 
+(e.g. perl-DBD-MySQL and mysql).  If necessary you can force the installation
+or uninstallation of a package using the --nodeps parameter (on install) or the 
+--force parameter (on removal) of an RPM.  See your documentation, rpm man pages, 
+or the internet for more help on this topic.
+
+
+
+IV. AWARE INSTALLATION AND CONFIGURATION
+
+AWARE ships as three RPMs:
+
+ - aware         = the aware server package
+ - aware-client  = the client daemon and utilities
+ - aware-source  = source RPMs for aware and prerequisites
+
+Install these RPMs once all prerequisites have been installed on the server.
+If any required packages are missing the RPM utility will identify the missing
+packages -- those will need to be obtained and built/installed.
+
+The resulting AWARE installation will be based in /opt as follows:
+
+  /opt/aware         [top-level directory]
+      |-cfg          default configuration files for AWARE
+      |-doc          AWARE documentation
+      |-logs         logs for the database consolidator and archiver go here
+      |-pids         pid files for AWARE (server) processes are stored here
+      |-other        source RPMs for AWARE prerequisites
+      |-schema       database schema and loader script
+      |-web          web page scripts
+         |-scripts   installer, pinger, and monitor daemons
+         |-archive   daily reports are stored here
+         |-images    web images
+             |-tmp   temporary image directory
+
+
+You will now need to customize your configuration file for AWARE.  This file
+should be located in /etc/aware as 'aware.cfg'.
+
+To help get you started AWARE includes a template in this directory
+which you should use as a starting point for your configuration file.
+
+Using your favorite editor you will need to customize this file to match
+your local environment.  Follow the instructions in the file when making your
+changes.  The main values you will need to set will be for the database 
+connection string and username/magicword.  
+
+As part of the ZUtils conop the aware.cfg configuration file will be accessed 
+at /etc/aware/aware.cfg -- however it is advisable to keep a master copy of the 
+file in /opt/aware/web/scripts/aware.cfg.  When the AWARE client is installed on a 
+machine (see below) part of that installation process will incorporate the
+retrieval of the master configuration file from the web server and installation 
+to the local /etc/aware directory.  
+
+
+
+IV. CREATE DATABASE TABLES 
+
+The next step is to create the AWARE database tables.  Use these steps to
+create the AWARE database tables and user account:   
+
+  # change to the AWARE base directory
+  cd /opt/aware
+
+  # change to the database schema subdirectory 
+  cd schema
+
+  # for this example:
+  # =================================================================
+  # hostname     = the database hostname
+  # admin user   = the database admin username
+  # asecret      = the database admin magicword
+  # aware_user   = the AWARE database username that will be created
+  # aware_pass   = the AWARE database magicword that will be created
+  # aware        = the name of the database that will be created
+  # =================================================================
+  # -- run the loader script
+  ./reload_mysql hostname admin_user asecret aware_user aware_pass aware 
+
+This command should create the AWARE database tables and account and then
+return to the prompt.
+
+  NOTE: for a default MySQL installation the DBA username is 'xxxx' and there
+  is no magicword (the magicword is the empty string).  If this is the case for
+  your installation, you can use '' to represent the empty string.  If you
+  are prompted for a magicword just hit [RETURN].  It is a good idea to set a
+  magicword for the xxxx database account, see your MySQL documentation for
+  more details.
+
+  # -- run the loader script (with a blank xxxx MySQL magicword)
+  ./reload_mysql hostname xxxx '' aware_user aware_pass aware 
+
+  # -- run the loader script (using dba user 'alibaba' and magicword 'opensesame')
+  ./reload_mysql hostname alibaba opensesame aware_user aware_pass aware 
+
+
+
+V. APACHE CONFIGURATION
+
+Aware takes care of most of the webserver configuration automatically.  
+
+*** IMPORTANT ***
+Remember that the apache user (or whatever user your webserver runs as, check the
+httpd.conf file if unsure) will need to be able to write to the 'images' and
+the 'archive' subdirectories of the aware web directory.  Be sure to set ownership 
+permissions accordingly.  
+
+Once the AWARE installation is complete you will need to restart Apache.  This 
+can be done using the apachectl script or by the service command on Redhat
+machines.  
+
+  # restart Apache on Redhat
+  /sbin/service httpd restart
+
+  # example for restarting Apache on other systems
+  /usr/local/apache/bin/apachectl restart
+
+You can test that things are working properly by running the 'database.cgi'
+program (first at the command line, then via a web browser):
+
+  # example command line
+  /var/www/html/aware/web/database.cgi
+  
+  --OR--
+  
+  # from within the same directory
+  ./database.cgi  
+  
+  
+If database.cgi prints out HTML and appears to exit cleanly you are ready to
+connect from a web browser:
+
+  # use a url like the following, substituting appropriate local values
+  http://your_hostname/aware/database.cgi
+  
+  --Example--
+  http://vader.inicorp.npa.gov/aware/database.cgi
+  
+Once this page loads correctly you are ready to proceed.  If this isn't working
+double-check the settings you used in 'aware.cfg'.  You can also look at the
+webserver error logs for more detail.  These logs are often found in a directory
+like /var/log/http or /usr/local/apache/logs.  Look at 'httpd.conf' if unsure.
+Refer to your Linux distribution documentation or Google for more help if necessary.
+
+
+
+VI.  OTHER SERVER INFORMATION
+
+*** IMPORTANT ***
+The AWARE web scripts are all perl-based and assume that a perl installation is
+available at /usr/bin/perl -- if this is not the case on your system you will
+need to modify the scripts or set up a symbolic link (much easier!) to your
+perl binary in /usr/bin (e.g. 'ln -sf /usr/local/bin/perl /usr/bin/perl').
+
+If you must modify the scripts, newer versions of sed can make this easier:
+
+  # change to the AWARE web directory
+  cd /opt/aware/web
+
+  # using sed to change the perl pointer for AWARE cgi scripts
+  sed -i 's/\/usr\/bin\/perl/\/usr\/local\/bin\/perl/' *.cgi
+
+
+
+VII. AWARE CLIENT INSTALLATION
+
+Each machine that you wish to monitor will need perl 5.x and the MySQL client.  Most
+linux distributions include these by default.  If AWARE is to be installed as part
+of an automated build process you will need to ensure that each client node has 
+the aware-client, perl-ZUtils-Common and perl-ZUtils-Aware RPMs installed at
+system install-time.  After that all that is needed is for each client to 
+receive a properly-configured 'aware.cfg' file in /etc/aware. 
+
+Another option is to use the included automated installer which can simplify the 
+process of installation on each client node.  To take advantage of
+the installer you will first need to obtain and install the appropriate RPMs on 
+each client system.  The RPMs that you will need for Redhat systems are normally: 
+
+	- mysql
+	- perl
+	- perl-CGI
+	- perl-DBI
+	- perl-DBD-MySQL
+
+Before you can use the installer you must first copy your properly-configured 
+aware.cfg file to the /opt/aware/web/scripts subdirectory.  You must edit the installer
+to set the hostname of your web server.  Follow the instructions in the comments
+when performing this step.  Once the hostname has been set you can install the 
+client portion of AWARE on a client machine by issuing the following commands:
+
+  # as admin user -- substitute appropriate local values
+  wget http://your_server/your_aware_directory/scripts/installer
+  perl installer
+
+The installer will determine a hostid for your machine, retrieve the ZUtils RPMs,
+build and install them for the local machine, and start the aware_daemon service.
+Once the installer has completed you can check the status of the aware_daemon via the 
+following command:
+
+  # check the status of the daemon
+  /sbin/service aware_daemon status
+  
+  # to start/stop/restart the daemon
+  /sbin/service aware_daemon start|stop|restart
+  
+If the aware_daemon is failing to start correctly you can look at the log file for
+more information.  The default aware_daemon log is '/var/log/aware_daemon.log'.
+
+  *** IMPORTANT ***
+  The AWARE client will need to be specifically installed on the server (assuming 
+  monitoring of the server is desired) -- it is not installed as part of the other
+  server configuration steps above.
+
+
+
+VIII. TEMPERATURE SUPPORT
+
+AWARE temperature monitoring is currently supported on Dell and HP.  In order for the
+temperature monitoring to work appropriate drivers must be installed.  For HP equipment
+AWARE can use either the cpqhealth driver (HP is phasing out this driver) or the 
+hpasmcli utility (available as part of the HP support pack for linux).  Note that the
+newer HP support pack installation process will remove the cpqhealth rpm during its
+installation.  Dell temperature support can be achieved via the Open Management
+utilities package.  AWARE uses the 'omreport' utility that should be installed
+during the Open Management installation process.  AWARE should gracefully handle
+equipment that does not include temperature support (or if the drivers are not
+installed).
+
+If AWARE is not correctly tracking temperatures on your machines please confirm that
+the temperature support is working correctly by trying the following:
+
+  # on HP w/ CPQHealth
+  cat /proc/cpqtemp
+  
+  # on HP w/ hpasmcli
+  hpasmcli -s "show temps"
+
+  # on HP w/ hplog
+  hplog -t
+  
+  # on Dell w/ Open Management 
+  omreport chassis temps 
+
+For more information on these drivers or the installation process please contact your
+vendor or visit their internet website.
+
+Warning -- on some HP and Dell machines the hpasmcli and omreport programs can "hang"
+when invoked.  When this happens the aware_daemon will stop reporting statistics to
+the server.  The problem can usually be resolved by updating the firmware and/or 
+software on the problematic host.
+
+
+
+IX. DAILY REPORTS ARCHIVE 
+
+AWARE automatically performs daily report archiving.  Daily reports are generated
+by the /opt/aware/web/scripts/archiver script.  Typically a cron job is used to
+launch this script.  It doesn't matter which user the cron job runs under as
+long as that user has write permissions to the 'archive' directory.  
+
+A typical cron entry for the archiver would look something like:
+
+	# example archiver cron job entry
+    15 0 * * * /opt/aware/web/scripts/archiver 1 2> /dev/null > /opt/aware/logs/archiver.log
+
+
+*** It is important that both the cron user and the web server user can write
+to the /opt/aware/web/archive directory.  Be sure to set permissions your
+accordingly.
+
+
+NOTE:  AWARE will attempt to set up this cron job at RPM installation-time.
+
+
+
+
+X. CONSOLIDATOR SCRIPT
+
+AWARE now features automated data consolidation.  This will allow AWARE to report
+on years worth of data for large numbers of hosts.  This consolidation is 
+performed by the /opt/aware/web/scripts/consolidator script.  Typically a cron 
+job is used to launch this script which needs to run regularly.  It doesn't really
+matter which user account is used to run the script, the 'aware' user account 
+will be configured at install-time automatically by default.
+
+A typical cron entry for the consolidator would look something like:
+
+	# example consolidator cron job entry
+    20 * * * * /opt/aware/web/scripts/consolidator 1 2> /dev/null > /opt/aware/logs/consolidator.log

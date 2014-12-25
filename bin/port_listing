@@ -1,0 +1,137 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+chomp(my $username = `whoami`);
+if ($username ne "root") {
+    print "WARNING: This program doesn't work very well unless you are root...\n";
+} else {
+    print "WARNING: this may take a few seconds...\n";
+}
+
+my @procdirs = `find /proc -name fd 2> /dev/null`;
+
+my %sockets;
+my %pids;
+foreach my $procdir (@procdirs) {
+
+	chomp($procdir);
+	my @socketfiles = `ls -l $procdir 2> /dev/null | grep "socket:" 2> /dev/null`;
+
+	my $pid = $procdir;
+	$pid =~ s/^\/proc\/([0-9][0-9]*)\/.*$/$1/;
+
+	#print "Looking at '$procdir' for PID $pid\n";
+
+	chomp(my $procname = `ls -l /proc/$pid/exe 2> /dev/null`);
+	$procname =~ s/.*\s//g;
+	$pids{$pid} = $procname;
+
+	foreach my $socket (@socketfiles) {
+		chomp($socket);
+
+		$socket =~ s/^.*socket:\[([0-9][0-9]*)\].*$/$1/g;
+		$sockets{$socket} = $pid;
+	}
+}
+
+
+my %uids;
+open(PASSWD, "</etc/passwd");
+
+while (<PASSWD>) {
+	chomp($_);
+	my ($user, $x, $uid, @others) = split(/:/, $_);
+	$uids{$uid} = $user;
+}
+close(PASSWD);
+
+my @nisusers = `ypcat passwd`;
+foreach my $nisuser (@nisusers) {
+	if ($nisuser !~ m/.*:.*:[0-9][0-9]*/) {
+		next;
+	}
+	my ($user, $x, $uid, @others) = split(/:/, $nisuser);
+	$uids{$uid} = $user;
+}
+
+print"------------------------------------------------ [Current Sockets] ------------------------------------------------\n";
+print"SOCKET                     PROCESS                                                           OWNER\n";
+
+my $type = "TCP";
+open(TCP, "</proc/net/tcp");
+while (<TCP>) {
+
+	if ($_ =~ m/local_address/) { next; }
+	$_ =~ s/^\s+//g;
+
+	my ($sl, $local_address, $rem_address, $st, $tx_queue, $tr, $retrnsmt, $uid, $timeout, $inode, @other) = split(/\s+/, $_);
+
+	if (defined($sockets{$inode}) && length($pids{$sockets{$inode}}) > 1) {
+		my $ipaddr = space_pad(getIP($local_address), 22);
+		my $process = space_pad("$pids{$sockets{$inode}} (PID=$sockets{$inode})", 65);
+		my $owner = space_pad("$uids{$uid} (UID=$uid)", 20);
+		print "$type $ipaddr $process $owner\n";
+	}
+}
+close(TCP);
+
+$type = "UDP";
+open(UDP, "</proc/net/udp");
+while (<UDP>) {
+
+	if ($_ =~ m/local_address/) { next; }
+	$_ =~ s/^\s+//g;
+
+	my ($sl, $local_address, $rem_address, $st, $tx_queue, $tr, $retrnsmt, $uid, $timeout, $inode, @other) = split(/\s+/, $_);
+
+	if (defined($sockets{$inode}) && length($pids{$sockets{$inode}}) > 1) {
+		my $ipaddr = space_pad(getIP($local_address), 22);
+		my $process = space_pad("$pids{$sockets{$inode}} (PID=$sockets{$inode})", 65);
+		my $owner = space_pad("$uids{$uid} (UID=$uid)", 20);
+		print "$type $ipaddr $process $owner\n";
+	}
+}
+close(UDP);
+
+
+sub space_pad {
+
+	my ($str, $len) = @_;
+
+	while (length($str) < $len) {
+		$str = "$str ";
+	}
+	return $str;
+}
+
+
+sub getIP {
+
+	my ($address) = @_;
+
+	my ($addr, $port) = split(/:/, $address);
+
+
+	my @ip;
+	for (my $i = 0; $i < 8; $i+= 2) {
+		my $str = substr($addr, $i, 2);
+		my $number = hex($str);
+		unshift(@ip, $number);
+	}
+
+	$port = hex($port);
+
+	my $ipaddr = 0;
+	foreach my $octet (@ip) {
+		if ($ipaddr) { 
+			$ipaddr = "$ipaddr.$octet";
+		} else {
+			$ipaddr = $octet;
+		}
+	}
+	if ($ipaddr =~ m/^0/) { $ipaddr = "*"; }
+
+	return "$ipaddr:$port";
+
+}

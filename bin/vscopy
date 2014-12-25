@@ -1,0 +1,273 @@
+#!/usr/bin/perl -w
+
+use DBI;
+use ZUtils::Common;
+use strict;
+
+load_config("/etc/aware/aware.cfg");
+main();
+
+sub printUsage() {
+
+	print "\n  Usage: vscopy <options> localfile [destfile]\n";
+	print "\n  -a              copy to all nodes including self";
+	print "\n  -c <cfgfile>    use <cfgfile> as the node configuration file";
+	print "\n  -d <dbhost>     use dbhost as the source database host";
+	print "\n  -h              print help menu";
+	print "\n  -i              don't use encryption (faster, but insecure!)";
+	print "\n  -l              list available profiles";
+	print "\n  -m <profile>    list members of a named profile";
+	print "\n  -n n1,n2        only copy to nodes n1 and n2";
+	print "\n  -q              suppress progress meter for secure transfers";
+	print "\n  -r r1,r2        only copy to racks r1 and r2";
+	print "\n  -t <type>       only run on nodes of type <type> (e.g. node, master, or fileserver)";
+	print "\n  -x n1,n2        copy to all nodes except n1 and n2";
+	print "\n\n";
+
+}	
+
+
+sub main {
+
+	my $_nodefile    = "/etc/voicesail/nodes";
+	my $_useFile	 = "false";
+	my $_includeSelf = "false";
+	my $_progname    = "vscopy";
+	my $_targetNodes = "false";
+	my $_localfile   = "";
+	my $_dbhost	     = "default";
+	my $_destfile    = "";
+	my $type		 = "node";
+	my $_copyprog	 = "/usr/bin/scp -4 -q -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=10";
+	my $rack		 = "rack like '%'";
+	my @nodes;
+	my @skip;
+
+	my $numArgs = scalar(@ARGV);
+	for (my $i = 0; $i < $numArgs; $i++) {
+		my $pre = $ARGV[$i];
+		if ($pre !~ m/^-/) {
+			if (length($_localfile) < 1) {
+				$_localfile = $pre;
+			} elsif (length($_destfile) < 1) {
+				$_destfile = $pre;
+			}
+			next;
+		}
+
+		$pre =~ s/-//g;
+		if ($pre =~ m/^a/) {
+			$_includeSelf = "true";
+		} elsif ($pre =~ m/^c/) {
+			$_nodefile = $ARGV[++$i];
+			$_useFile = "true";
+		} elsif ($pre =~ m/^i/) {
+			$_copyprog = "/usr/bin/rcp";
+		} elsif ($pre =~ m/^d/) {
+			$_dbhost = $ARGV[++$i]; 
+		} elsif ($pre =~ m/^m/) {
+			$i++;
+			if (defined($ARGV[$i])) {
+				chomp($ARGV[$i]);
+				print_members($ARGV[$i]);
+			} else {
+				printUsage();
+			}
+			exit(0);
+		} elsif ($pre =~ m/^l/) {
+			print_groups();
+			exit(0);
+		} elsif ($pre =~ m/^t/) {
+			$type = $ARGV[++$i];
+		} elsif ($pre =~ m/^n/) {
+			$_targetNodes = "true";
+			$_includeSelf = "true";
+			@nodes = split(/,/, $ARGV[++$i]);
+		} elsif ($pre =~ m/^q/) {
+			$_copyprog = "/usr/bin/scp -q";
+		} elsif ($pre =~ m/^r/) {
+			my @racks = split(/,/, $ARGV[++$i]);
+			$rack = "";
+			for(my $i = 0; $i < $#racks; $i++) {
+				$rack = $rack . " rack = '$racks[$i]' or ";
+			}
+			$rack = $rack . "rack = '$racks[$#racks]'";
+		} elsif ($pre =~ m/^x/) {
+			$_includeSelf = "true";
+			@skip = split(/,/, $ARGV[++$i]);
+		} elsif ($pre =~ m/^h/) {
+			printUsage();
+			exit(0);
+		}
+	}
+
+	if (length($_destfile) < 1) {
+		$_destfile = $_localfile;
+	}
+	
+	if (length($_localfile) < 1) {
+		print "$_progname: No file given to copy!\n";
+		printUsage();
+		exit(1);
+	}
+
+
+	chomp(my $_localnode = `hostname`);
+	# truncate local node down to canonical name
+	$_localnode =~ s/\..*//g;
+
+	if ($_includeSelf eq "false") {
+		chomp (my $hostname = `hostname`);
+		push (@skip, $hostname);
+	}
+
+	if ($_targetNodes eq "false") {
+		if ($_useFile eq "true") {
+			@nodes = `cat $_nodefile`; 
+		} else {
+			@nodes = get_nodes($rack, $type, $_dbhost);
+		}
+		my $ncount = 0;
+		foreach my $node (@nodes) {
+			# strip trailing newlines 
+			chomp($node);
+			$ncount++;
+		}
+		if ($ncount < 1) {
+
+			print "No suitable nodes found in '$_nodefile' -- does file exist?\n";
+			exit(1);
+		}
+	}
+
+	foreach my $node (@nodes) {
+		if (!contains($node, @skip)) {
+			print "Copying $_localfile to $node:$_destfile\n";
+			#`/usr/bin/rcp $_localfile $node:$_destfile`;
+			#`scp $_localfile $node:$_destfile`;
+			system("$_copyprog $_localfile $node:$_destfile");
+		}
+	}
+
+
+} # end main()
+
+
+
+sub get_nodes {
+
+	my ($rack, $type, $dbhost) = @_;
+
+	if (!$type) { $type = "node"; }
+	if (!$dbhost) { $dbhost = "default"; }
+
+
+	# Connect to the database.
+	my $dbh = get_db_connection();
+
+	# Now retrieve data from the table.
+	my $sql = "select a.hostname from node a, profile b where a.profile_id = b.id and ($rack)";
+	if ($type) { $sql .= " and b.name = '$type'"; }
+	$sql .= " order by a.idx, a.hostname";
+
+	my $sth = $dbh->prepare($sql);
+	$sth->execute();
+
+	my @n;
+	while (my @row = $sth->fetchrow_array()) {
+		push(@n, $row[0]);
+
+	}
+
+	$sth->finish();
+	$dbh->disconnect();
+	return @n;
+}
+
+
+sub print_groups {
+
+	# Connect to the database.
+	my $dbh = get_db_connection(0);
+
+	# get a list of available profiles
+	my $sql = "select count(*), pr.name, pr.description from profile pr, node n where pr.id = n.profile_id group by pr.name, pr.description";
+	my $sth = $dbh->prepare($sql) || die "SQL ERROR ($sql): " . $dbh->errstr;
+	$sth->execute() || die "DB ERROR ($sql): " . $dbh->errstr;;
+	print " -------------+--------------+---------------------- \n";
+	print "    Profile   |     Count    | Description \n";
+	print " -------------+--------------+---------------------- \n";
+	while (my @row = $sth->fetchrow()) {
+		my $count = rspacepad($row[0] || "", 4);
+		my $profile = spacepad($row[1] || "", 12);
+		my $description = $row[2] || "";
+		print " $profile | $count node(s) | $description\n";
+	}
+	print " -------------+--------------+---------------------- \n";
+	$sth->finish();
+	$dbh->disconnect();
+
+
+}
+
+
+sub print_members {
+
+	my ($group) = @_;
+
+	# Connect to the database.
+	my $dbh = get_db_connection(0);
+
+	# get a list of available nodes
+	my $sql = "select hostname from node, profile where node.profile_id = profile.id and profile.name = '$group' order by node.hostname";
+	my $sth = $dbh->prepare($sql) || die "SQL ERROR ($sql): " . $dbh->errstr;
+	$sth->execute() || die "DB ERROR ($sql): " . $dbh->errstr;;
+	print "------------------------------------\n";
+	print "Profile Group: $group\n";
+	print "------------------------------------\n";
+	my $count = 0;
+	while (my @row = $sth->fetchrow()) {
+		my $node = $row[0] || "";
+		print " - $node\n";
+		$count++;
+	}
+	print "------------------------------------\n";
+	print "$count nodes\n";
+	$sth->finish();
+	$dbh->disconnect();
+}
+
+
+
+sub rspacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = " $string"; }
+	return $string;
+}
+
+
+sub spacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = "$string "; }
+	return $string;
+}
+
+
+sub contains {
+	my ($arg, @arr)  = @_;
+	my $arg_canon = $arg;
+	$arg_canon =~ s/\..*//g;
+
+	foreach my $memb (@arr) {
+		my $memb_canon = $memb;
+		$memb_canon =~ s/\..*//g;
+		if ($memb_canon eq $arg_canon || $memb eq $arg) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+1;
+
+

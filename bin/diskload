@@ -1,0 +1,129 @@
+#!/usr/bin/perl -w
+
+use strict;
+
+my $duration = shift || 1;
+my $window = shift || 1;
+
+my $statsfile = "/proc/partitions";
+my $firstline = 2;
+my $offset = 3;
+
+if (-e "/proc/diskstats") {
+	$statsfile = "/proc/diskstats";
+	$firstline = 0;
+	$offset = 2;
+}
+
+my $sectorsT = 0;
+for (my $i = 0; $i < $duration; $i++) {
+	my @before = ();
+	open (STAT, "<$statsfile");
+	while (<STAT>) { push(@before, $_); }
+	close(STAT);
+
+	sleep(1 * $window);
+	my @after = ();
+	open (STAT, "<$statsfile");
+	while (<STAT>) { push(@after, $_); }
+	close(STAT);
+
+	chomp($before[0]);
+	chomp($after[0]);
+
+	print "---------------------------------------------------[ " . localtime() . " ]-----------------------------------------------------\n";
+	print "DEVICE               RIO   RMERGE    RSECT     RUSE      WIO   WMERGE    WSECT     WUSE      RUN      USE    AVE/Q  SVCTIME    \%UTIL\n";
+
+	for (my $i = $firstline; $i <= $#before; $i++) {
+
+		$after[$i] =~ s/^\s+//g;
+		$before[$i] =~ s/^\s+//g;
+		chomp($after[$i]);
+		chomp($before[$i]);
+
+		my (@fields_b) = split(/\s+/, $before[$i]);
+		my (@fields_a) = split(/\s+/, $after[$i]);
+
+		if ($#fields_a < 11) { next; }
+
+		my $device = spacepad("$fields_a[$offset]:", 15);
+		
+		#my $diff_tx = comma_format(($fields_a[9] - $fields_b[9]));
+		#my $diff_rx = comma_format(($fields_a[1] - $fields_b[1]));
+		#my $rkbs = rspacepad(comma_format((($fields_a[4] - $fields_b[4]) / 1)), 8);
+		#my $rrqms = rspacepad(comma_format(($fields_a[5] - $fields_b[5])), 8);
+		#my $rsect = rspacepad(comma_format(($fields_a[6] - $fields_b[6])), 8);
+		#my $ruse = rspacepad(comma_format(($fields_a[7] - $fields_b[7])), 8);
+		#my $wkbs = rspacepad(comma_format((($fields_a[8] - $fields_b[8]) / 1)), 8);
+		#my $wrqms = rspacepad(comma_format(($fields_a[9] - $fields_b[9])), 8);
+		#my $wsect = rspacepad(comma_format(($fields_a[10] - $fields_b[10])), 8);
+		#my $wuse = rspacepad(comma_format(($fields_a[11] - $fields_b[11])), 8);
+		#my $running = rspacepad(comma_format(($fields_a[12] - $fields_b[12])), 8);
+		#my $use = rspacepad(comma_format(($fields_a[13] - $fields_b[13])), 8);
+		#my $aveq = rspacepad(comma_format(($fields_a[14] - $fields_b[14])), 8);
+
+		print "$device ";
+		for (my $j = $offset + 1; $j <= $offset + 11; $j++) {
+
+			my $value = rspacepad(comma_format($fields_a[$j] - $fields_b[$j]), 8);
+			print "$value ";
+
+		}
+
+		my $diskIOs = $fields_a[$offset + 1] - $fields_b[$offset + 1];
+		$diskIOs += $fields_a[$offset + 5] - $fields_b[$offset + 5];
+		my $utilization = ($fields_a[$offset + 10] - $fields_b[$offset + 10]) / ($window);
+		my $svctime = 0;
+		if ($diskIOs) { $svctime = $utilization / $diskIOs; }
+		$svctime = rspacepad(sprintf("%.2f", $svctime), 8);
+		$utilization = rspacepad(sprintf("%.2f", $utilization / 10), 8);
+
+		print "$svctime $utilization";
+
+
+		print "\n";
+
+		#$diff_tx = rspacepad("$diff_tx bytes", 20);
+		#$diff_rx = rspacepad("$diff_rx bytes", 20);
+		#print "$device TX = $diff_tx, RX = $diff_rx\n";
+		#print "$device $rrqms $rkbs $rsect $ruse $wrqms $wkbs $wsect $wuse $running $use $aveq\n"; 
+	
+	}
+	print "\n";
+}
+
+
+sub rspacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = " $string"; }
+	return $string;
+}
+
+sub spacepad {
+	my ($string, $length) = @_;
+	while (length($string) < $length) { $string = "$string "; }
+	return $string;
+}
+
+sub comma_format {
+
+        my ($number) = @_;
+        my $decimal = "";
+
+        if ($number =~ m/\./) {
+                $decimal =~ s/^.*\.//g;
+                $number =~ s/\..*$//g;
+        }
+
+        my @array = ();
+
+        while ($number =~ /\d\d\d\d/) {
+
+                $number =~ s/(\d\d\d)$//;
+                unshift(@array, $1);
+        }
+        unshift(@array, $number);
+        $number = join(",", @array);
+        $number = "$number\.$decimal" if $decimal =~ /\d/;
+        return $number;
+}

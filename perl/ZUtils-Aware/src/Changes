@@ -1,0 +1,6 @@
+Revision history for Perl extension ZUtils::Aware.
+
+0.01  Fri Jul 14 04:35:37 2006
+	- original version; created by h2xs 1.23 with options
+		-XA -n ZUtils::Aware
+

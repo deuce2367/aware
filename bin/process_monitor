@@ -1,0 +1,430 @@
+#!/usr/bin/perl -w
+
+#-----------------------------------------------------------------------------------------------
+# aware_daemon This shell script takes care of starting and stopping the node statistics daemon
+#
+# chkconfig: 2345 85 25 
+# description: aware_daemon loads system monitoring stats into the central database
+#
+# $RCSfile: process_monitor,v $
+# $Revision: 1.2 $
+# $Date: 2008/05/29 13:12:47 $
+# $Author: aps1 $
+# $Name:  $
+#-----------------------------------------------------------------------------------------------
+
+use DBI;
+use POSIX;
+use Time::Local;
+use Sys::Hostname;
+use Socket;
+use ZUtils::Common;
+use ZUtils::Aware;
+use GD::Graph::hbars;
+use Time::HiRes qw(sleep usleep ualarm gettimeofday tv_interval);
+use Getopt::Long;
+use strict;
+
+
+
+#-----------------------------------------------------------------------------------------------
+# The AWARE configuration file must be available at this location
+#-----------------------------------------------------------------------------------------------
+load_config("/etc/aware/aware.cfg");
+my $NAME = "process_monitor";
+
+
+#-----------------------------------------------------------------------------------------------
+# Ideally - one shouldn't need to edit anything after this point...
+#-----------------------------------------------------------------------------------------------
+my $DATE = get_date();
+chomp(my $HOST = `hostname`);
+
+# max cpus -- the max number of cpus supported (currently 8)
+my $MAXCPUS = 8;
+
+# -- what kind of CPU are we running?
+my $cpucount = 0;
+my $cpu_type = "";
+open(CPUINFO, "</proc/cpuinfo");
+    while(<CPUINFO>) {
+    chomp($_);
+    if ($_ !~ m/:/) { next; }
+        my ($label, $value) = split(/:/, $_);
+        $value =~ s/^\s+//g;
+        print_log("CPUINFO: $label -> $value", 3);
+        if ($label =~ m/^processor/) { $cpucount++; }
+        if ($label =~ m/^model name/) { $cpu_type = $value }
+    }
+close(CPUINFO);
+
+
+#-----------------------------------------------------------------------------------------------
+# Handle these signals so we can exit gracefully
+#-----------------------------------------------------------------------------------------------
+my $time_to_die = 0;
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = $SIG{USR1} = \&my_signal_handler;
+
+# -- Globals 
+my $WINDOW = 10;
+my $SAMPLES = 0;
+my $PLOT = 0;
+my $VERBOSITY = 1;
+my $DELAY = 1;
+my $PROCS = 50;
+
+# -- determine if there were any optional usage parameters
+my %options = ();
+GetOptions(\%options, "help", "verbosity=s", "plot=s", "window=s", "samples=s", "delay=s", "limit=s");
+if (defined($options{help})) { print_usage(); exit(0); }
+if (defined($options{verbosity})) { $VERBOSITY = $options{verbosity}; }
+if (defined($options{plot})) { $PLOT = $options{plot}; }
+if (defined($options{window})) { $WINDOW = $options{window}; }
+if (defined($options{samples})) { $SAMPLES = $options{samples}; }
+if (defined($options{limit})) { $PROCS = $options{limit}; }
+
+
+set_config("verbosity", $VERBOSITY);
+
+print_log("------------ $NAME initializing (pid = $$, debug level = $VERBOSITY) ------------", 1);
+print_log(" - sampling window size: $WINDOW sec.", 1);
+if ($SAMPLES) { print_log(" - maximum # of samples: $SAMPLES sample(s)", 1); }
+
+
+my $old = $/;
+
+my %processes;
+my %user;
+my %sys;
+my %total;
+
+my $samples = 0;
+
+
+# -- the loop
+until ($time_to_die || ($SAMPLES && $samples > $SAMPLES)) {
+
+    sleep(rand($DELAY));
+
+    my $cmd = "find /proc/ -maxdepth 1 -type d 2>/dev/null";
+    print_log(" - looking for processes: $cmd", 2);
+    my @procs = `$cmd`;
+
+    my @processDirs;
+    my %processNames;
+    foreach my $processDir (@procs) {
+        
+        chomp($processDir);
+        if ($processDir =~ m/^\/proc\/[0-9]+$/) {
+            if (-e "$processDir/cmdline") {
+               
+                my $cmdline = ""; 
+                open(STATUS, "<$processDir/status");
+                while(<STATUS>) {
+                    if ($_ =~ m/^Name:/) {
+                        chomp($cmdline = $_);
+                        $cmdline =~ s/Name:\s+//g;
+                        last;
+                    }
+                }
+                close(STATUS);
+
+                open(CMDLINE, "<$processDir/cmdline");
+                binmode(CMDLINE);
+                $/ = "\0";
+                my $count = 0;
+                while(<CMDLINE>) { 
+                    $_ =~ s/\0//g;
+                    if ($count) { $cmdline .= " $_"; }
+                    $count++;
+                }
+                close(CMDLINE);
+                $/ = $old;
+
+                $cmdline = substr($cmdline, 0, 64);
+                $cmdline =~ s/^.*\|\| //g;
+                $cmdline =~ s/ -.*$//g;
+                $cmdline =~ s/ \/.*$//g;
+                $cmdline =~ s/;.*$//g;
+
+                print_log(" - adding monitor process: $processDir ($cmdline)", 2);
+                $processNames{$processDir} = $cmdline;
+                push(@processDirs, $processDir);
+                $processes{$cmdline} = 1;
+
+            }
+        }
+    }
+    process_utilization(\@processDirs, \%processNames);
+    $samples++;
+}
+
+if ($PLOT && $samples) { print_log("Wrote $samples sample(s): " . create_graph($PLOT, $PROCS, 1024,768, \%processes, \%user, \%sys, \%total), 0); }
+
+
+sub process_utilization {
+
+    my ($arrayRef, $hashRef) = @_;
+    my @processDirs = @{$arrayRef};
+    my %processNames = %{$hashRef};
+    my %skipDirs;
+
+    # ---------------------------------------------------------------------------
+    # calculate utilization for System / CPU / Disk-IO 
+    # ---------------------------------------------------------------------------
+
+    # -- cpu stats
+    my %beforeHash;
+
+    my @beforeStat;
+    open (STAT, "</proc/stat");
+    while (<STAT>) { push(@beforeStat, $_); }
+    close(STAT);
+
+    foreach my $processDir (@processDirs) {
+        if (-e "$processDir/stat") {
+            my @before_stat = ();
+            open (STAT, "<$processDir/stat");
+            while (<STAT>) { push(@before_stat, $_); }
+            close(STAT);
+            $beforeHash{$processDir} = \@before_stat;
+        } else {
+            print_log(" - $processDir went away before sampling began", 1);
+            $skipDirs{$processDir} = 1;
+        }
+    }
+
+    # -- sleep for the specified time (in seconds)
+    print_log(" - sampling for $WINDOW sec.", 2);
+    sleep($WINDOW);
+
+    # -- gather cpu stats
+    my %afterHash;
+
+    my @afterStat;
+    open (STAT, "</proc/stat");
+    while (<STAT>) { push(@afterStat, $_); }
+    close(STAT);
+
+    foreach my $processDir (@processDirs) {
+
+        if (-e "$processDir/stat") {
+            my @after_stat = ();
+            open (STAT, "<$processDir/stat");
+            while (<STAT>) { push(@after_stat, $_); }
+            close(STAT);
+            $afterHash{$processDir} = \@after_stat;
+        } else {
+            if (defined($beforeHash{$processDir})) {
+                delete($beforeHash{$processDir});
+                print_log(" - $processDir went away during sampling", 1);
+                $skipDirs{$processDir} = 1;
+            } else {
+                print_log(" - $processDir went away *just* before sampling began", 1);
+                $skipDirs{$processDir} = 1;
+            }
+        }
+    }
+
+
+    # -- Calculate CPU Stats
+    chomp($beforeStat[0]);
+    chomp($afterStat[0]);
+
+    my ($cpu1, $user1, $nice1, $sys1, $idle1, $iowait1, $irq1, $softirq1) = split(/\s+/, $beforeStat[0]);
+    my ($cpu2, $user2, $nice2, $sys2, $idle2, $iowait2, $irq2, $softirq2) = split(/\s+/, $afterStat[0]);
+    my $diffUser = ($user2) - ($user1);
+    my $diffSystem = ($nice2 + $sys2) - ($nice1 + $sys1);
+
+    my $userTotal = sprintf("%6.2f", ($user2 - $user1) / ($cpucount * $WINDOW)); 
+    my $niceTotal = sprintf("%6.2f", ($nice2 - $nice1) / ($cpucount * $WINDOW)); 
+    my $systemTotal = sprintf("%6.2f", ($sys2 - $sys1) / ($cpucount * $WINDOW)); 
+    my $iowaitTotal = sprintf("%6.2f", 0);
+    my $irqTotal = sprintf("%6.2f", 0);
+    my $softirqTotal = sprintf("%6.2f", 0);
+    if (defined($iowait1)) {
+        # this kernel supports the newer stat reporting
+        $iowaitTotal = sprintf("%6.2f", ($iowait2 - $iowait1) / ($cpucount * $WINDOW)); 
+        $irqTotal = sprintf("%6.2f", ($irq2 - $irq1) / ($cpucount * $WINDOW)); 
+        $softirqTotal = sprintf("%6.2f", ($softirq2 - $softirq1) / ($cpucount * $WINDOW)); 
+            
+        $diffSystem = ($nice2 + $sys2 + $iowait2 + $irq2 + $softirq2) - 
+            ($nice1 + $sys1 + $iowait1 + $irq1 + $softirq1);
+    }
+    my $userload = sprintf("%6.2f", ($diffUser / $cpucount) / $WINDOW);
+    my $sysload = sprintf("%6.2f", ($diffSystem  / $cpucount) / $WINDOW);
+    my $totalLoad = sprintf("%6.2f", $userload + $sysload);
+    my $idleTotal = sprintf("%6.2f", 100 - ($totalLoad));
+    
+
+    print_log("-------------------------------------------------------------------------------------", 1);
+    print_log(" USER   SYSTEM  IOWAIT IRQ    SOFTIRQ ||  TOTAL  IDLE", 1);
+    print_log("$userTotal $systemTotal $iowaitTotal $irqTotal $softirqTotal    || $totalLoad $idleTotal", 1);
+    print_log("-------------------------------------------------------------------------------------", 1);
+    print_log("Total CPU:  User  / System || Scaled CPU:  User  / System || procdir || process", 1);
+    foreach my $processDir (@processDirs) {
+
+        if (defined($skipDirs{$processDir})) { next; }
+
+        my $beforeRef = $beforeHash{$processDir};
+        my @before_stat = @{$beforeRef};
+
+        my $afterRef = $afterHash{$processDir};
+        my @after_stat = @{$afterRef};
+
+        # -- Calculate CPU Stats
+        chomp($before_stat[0]);
+        chomp($after_stat[0]);
+
+
+        my (@beforeFields) = split(/\s+/, $before_stat[0]);
+        my (@afterFields) = split(/\s+/, $after_stat[0]);
+
+        my $user1 = $beforeFields[13];
+        my $sys1 = $beforeFields[14];
+
+        my $user2 = $afterFields[13];
+        my $sys2 = $afterFields[14];
+
+        my $diffUser = ($user2) - ($user1);
+        my $diffSystem = ($sys2) - ($sys1);
+
+        if (!$diffUser && !$diffSystem) { next; }
+
+        my $userTotal = sprintf("%6.2f", ($diffUser) / ($WINDOW)); 
+        my $systemTotal = sprintf("%6.2f", ($diffSystem) / ($WINDOW)); 
+        my $userload = sprintf("%6.2f", ($diffUser) / ($WINDOW * $cpucount));
+        my $sysload = sprintf("%6.2f", ($diffSystem) / ($WINDOW * $cpucount));
+
+        if ($userTotal || $systemTotal) {
+
+            if (defined($total{$processNames{$processDir}})) {
+                $user{$processNames{$processDir}} = $user{$processNames{$processDir}}  + $diffUser;
+                $sys{$processNames{$processDir}} = $sys{$processNames{$processDir}} + $diffSystem;
+                $total{$processNames{$processDir}} = $user{$processNames{$processDir}} + $sys{$processNames{$processDir}};
+            } else { 
+                $user{$processNames{$processDir}} = $diffUser;
+                $sys{$processNames{$processDir}} = $diffSystem;
+                $total{$processNames{$processDir}} = $diffUser + $diffSystem;
+            }
+
+            print_log("CPU Usage: $userTotal / $systemTotal || CPU Scaled: $userload / $sysload || $processDir || $processNames{$processDir}", 1);
+        }
+
+    }
+
+}
+
+
+
+
+
+sub create_graph {
+
+    my ($filename, $limit, $X, $Y, $pRef, $uRef, $sRef, $tRef) = @_;
+
+    $filename =~ s/\.gif$//g;
+
+    my @processes = keys(%{$pRef});
+    my %userCPU = %{$uRef};
+    my %sysCPU = %{$sRef};
+    my %totalCPU = %{$tRef};
+
+
+    my @datasets;
+    my @legend = ("USER", "SYSTEM");
+    my @labels;
+    my @gdata;
+
+    my $gpoint = 0;
+    my $max = 0;
+    foreach my $process (reverse(sort { $totalCPU{$a} <=> $totalCPU{$b} } keys %totalCPU)) {
+        if ($gpoint >= $limit) { next; }
+        push(@labels, $process);
+
+        $gdata[0][$gpoint] = $userCPU{$process};
+        $gdata[1][$gpoint] = $sysCPU{$process};
+
+        if ($max < $userCPU{$process} + $sysCPU{$process}) { $max = $userCPU{$process} + $sysCPU{$process}; }
+
+        $gpoint++;
+
+    }
+
+    $max = $max * 1.25;
+
+    push @datasets, [@labels];
+
+    for (my $i = 0; $i <= $#legend; $i++) {
+        my @array;
+        for (my $j = 0; $j <= $#labels; $j++) {
+            push(@array, $gdata[$i][$j]);
+        }
+        push @datasets, [@array];
+    }
+    my $skip = int (($#gdata + 1) / 45); 
+    my $vertical = 1;
+
+    my $data = GD::Graph::Data->new([@datasets]);
+    my $GRAPH =  GD::Graph::hbars->new($X,$Y);
+
+
+    $GRAPH->set(
+        y_label         => "CPU JIFFIES",
+        x_label         => 'PROCESS NAME',
+        title           => "CPU Usage by Process",
+        textclr         => 'black',
+        labelclr        => 'black',
+        boxclr          => 'dgreen',
+        fgclr           => 'green',
+        shadowclr       => 'dgray',
+        legendclr       => 'black',
+        bgclr           => 'white',
+        axislabelclr    => 'black',
+        line_width      => 2,
+        x_labels_vertical => 0,
+        bar_spacing       => 3,
+        long_ticks      => 1,
+        y_tick_number   => 16,
+        y_max_value     => $max,
+        y_min_value     => 0,
+        y_number_format => "%d",
+        x_label_skip    => $skip,
+        cumulate        => 1,
+        correct_width   => 0,
+        transparent     => 0,
+    )
+    or warn $GRAPH->error;
+
+    $GRAPH->set ( dclrs => [ qw(lblue cyan) ]);
+
+    $GRAPH->set_legend(@legend);
+    $GRAPH->plot($data) or die "Error encountered plotting data!!\n";
+    $filename = save_chart($GRAPH, $filename);
+    return $filename;
+}
+
+sub print_usage {
+
+    print "Usage: $NAME [options]\n\n";
+    print " --verbosity=<0|1|2>    run at this level of verbosity/logging\n";
+    print " --window <window>      use this sampling window size (seconds, fractional allowed, default==$WINDOW)\n";
+    print " --samples <samples>    exit after this many samples (default==$SAMPLES)\n";
+    print " --delay <delay>        sleep about this many seconds between runs (default==$DELAY)\n";
+    print " --plot <filename>      plot the results as a GIF with the specified filename\n";
+    print " --limit <limit>        plot this many processes (default==$PROCS)\n";
+
+    print "\n\n";
+    exit();
+}
+
+sub my_signal_handler {
+    my ($sig) = @_;
+    print_log("Received Signal: $sig", 1);
+    if ($sig ne "USR1") {
+        $time_to_die++;
+    } else {
+        if ($PLOT && $samples) { print_log("Wrote $samples sample(s): " . create_graph($PLOT, $PROCS, 1024,768, \%processes, \%user, \%sys, \%total), 0); }
+    }
+    return;
+}

@@ -1,0 +1,77 @@
+#!/usr/bin/perl -w
+
+my $major = 0;
+my $minor = '$Revision: 575 $';
+$minor =~ s/^.*: //g;
+$minor =~ s/ \$$//g;
+
+use ZUtils::Common;
+use FindBin;
+use POSIX;
+use strict;
+
+# -------------------------------------------------------------------
+# Initialize Configuration Settings
+# -------------------------------------------------------------------
+my $cfgfile = $ENV{ZUTILS_CFGFILE} || "/etc/aware/aware.cfg";
+load_config($cfgfile);
+	
+
+if ($#ARGV < 5) {
+
+	print "Usage: $0 <host> <dba_user> <dba_pass> <user> <pass> <databaseName>\n";
+	exit();
+}
+my $host = $ARGV[0];
+my $dba_user = $ARGV[1];
+my $dba_pass = $ARGV[2];
+my $user = $ARGV[3];
+my $pass = $ARGV[4];
+my $dbname = $ARGV[5];
+
+if (length($dba_pass) > 0) { $dba_pass = "-p$dba_pass"; }
+chomp($dbname);
+
+# -- remove the existing schema
+print " - Removing old database: $dbname\n";
+system("mysqladmin -u $dba_user $dba_pass -h $host -f drop $dbname");
+print " - Adding Database: $dbname\n";
+system("mysqladmin -u $dba_user $dba_pass -h $host -f create $dbname");
+
+# -- create the tables
+print " - Creating Tables in $dbname\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/tables.sql");
+
+print " - Loading RRD Tables in $dbname\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/sysload.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/sysload_triggers.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/memory.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/memory_triggers.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/diskload.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/diskload_triggers.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/netload.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/netload_triggers.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/sensor.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/sensor_triggers.sql");
+
+print " - Inserting default values in $dbname\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/insert.sql");
+
+print " - Updating special values in $dbname\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/update.sql");
+
+print " - Setting database version information in $dbname\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname -e 'insert into aware (major, minor) values ($major, $minor)'");
+
+# -- add the user account
+my $createFile = "/tmp/mysql_user_create_$$.sql";
+open(SQL, ">$createFile");
+print SQL "grant all privileges on $dbname.* to $user\@localhost identified by '$pass';\n";	
+print SQL "grant all privileges on $dbname.* to $user\@'%' identified by '$pass';\n";
+print SQL "flush privileges;\n";
+print SQL "commit;\n";
+close(SQL);
+
+print " - Adding User: $createFile\n";
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $createFile");
+
