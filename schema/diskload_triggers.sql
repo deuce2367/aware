@@ -15,10 +15,10 @@ CREATE TRIGGER  diskload_insert
 BEFORE INSERT ON diskload
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'diskload';
   IF NEW.id = 0 THEN
     INSERT into diskload_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM diskload_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -33,10 +33,10 @@ CREATE TRIGGER  diskload_daily_insert
 BEFORE INSERT ON diskload_daily
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'diskload_daily';
   IF NEW.id = 0 THEN
     INSERT into diskload_daily_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM diskload_daily_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -51,10 +51,10 @@ CREATE TRIGGER  diskload_weekly_insert
 BEFORE INSERT ON diskload_weekly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'diskload_weekly';
   IF NEW.id = 0 THEN
     INSERT into diskload_weekly_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM diskload_weekly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -69,10 +69,10 @@ CREATE TRIGGER  diskload_monthly_insert
 BEFORE INSERT ON diskload_monthly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'diskload_monthly';
   IF NEW.id = 0 THEN
     INSERT into diskload_monthly_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM diskload_monthly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -91,7 +91,7 @@ CREATE TRIGGER  diskload_consolidator
 AFTER INSERT ON diskload
 FOR EACH ROW
 BEGIN
-  set @window = 5;
+  select window_size into @window from table_info where table_name = 'diskload_daily';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -114,7 +114,7 @@ CREATE TRIGGER  diskload_daily_consolidator
 AFTER INSERT ON diskload_daily
 FOR EACH ROW
 BEGIN
-  set @window = 30;
+  select window_size into @window from table_info where table_name = 'diskload_weekly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -137,7 +137,7 @@ CREATE TRIGGER  diskload_weekly_consolidator
 AFTER INSERT ON diskload_weekly
 FOR EACH ROW
 BEGIN
-  set @window = 180;
+  select window_size into @window from table_info where table_name = 'diskload_monthly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;

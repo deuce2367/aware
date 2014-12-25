@@ -13,8 +13,8 @@ Vendor: http://www.sourceforge.com
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 Requires: perl-ZUtils-Common >= 1.44
 Requires: perl-ZUtils-Aware >= 1.32
-Requires: mysql-server httpd perl-GD perl-GD-Graph perl-GD-Graph3d perl-GD-Text-Util 
-Requires: perl-Date-Calc perl-Bit-Vector 
+Requires: mysql-server httpd perl(GD) perl(GD::Graph) perl(GD::Graph3d) perl(GD::Text)
+Requires: perl(Date::Calc) perl(Bit::Vector)
 Requires(post): /sbin/chkconfig
 Requires(preun): /sbin/chkconfig /sbin/service
 Requires(postun): /sbin/service sed
@@ -29,7 +29,7 @@ Summary: Aware Systems Monitor (client daemon)
 Group: Applications/System
 Requires(post): /sbin/chkconfig
 Requires(preun): /sbin/chkconfig /sbin/service
-Requires: perl-ZUtils-Common perl-ZUtils-Aware perl-XML-Writer perl-GD-Graph
+Requires: perl(ZUtils::Common) perl(ZUtils::Aware) perl(XML::Writer) perl(GD::Graph)
 
 %description client
 The Aware client daemon

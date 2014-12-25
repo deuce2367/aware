@@ -8,7 +8,7 @@
 # ------------------------------------------------------------------------------------------
 
 
-          AWARE Installation and Configuration Guide -- Release 010 
+          AWARE Installation and Configuration Guide -- Release 017 
 
 
 I. INTRODUCTION
