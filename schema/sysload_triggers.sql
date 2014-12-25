@@ -10,10 +10,10 @@ CREATE TRIGGER  sysload_insert
 BEFORE INSERT ON sysload
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sysload';
   IF NEW.id = 0 THEN
     INSERT into sysload_rrd_key VALUES(0);
-	select LAST_INSERT_ID() % @rows into @rrd_key;
+	select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sysload_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -28,10 +28,10 @@ CREATE TRIGGER  sysload_daily_insert
 BEFORE INSERT ON sysload_daily
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sysload_daily';
   IF NEW.id = 0 THEN
     INSERT into sysload_daily_rrd_key VALUES(0);
-	select LAST_INSERT_ID() % @rows into @rrd_key;
+	select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sysload_daily_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -46,10 +46,10 @@ CREATE TRIGGER  sysload_weekly_insert
 BEFORE INSERT ON sysload_weekly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sysload_weekly';
   IF NEW.id = 0 THEN
     INSERT into sysload_weekly_rrd_key VALUES(0);
-	select LAST_INSERT_ID() % @rows into @rrd_key;
+	select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sysload_weekly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -64,10 +64,10 @@ CREATE TRIGGER  sysload_monthly_insert
 BEFORE INSERT ON sysload_monthly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sysload_monthly';
   IF NEW.id = 0 THEN
     INSERT into sysload_monthly_rrd_key VALUES(0);
-	select LAST_INSERT_ID() % @rows into @rrd_key;
+	select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sysload_monthly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -86,7 +86,7 @@ CREATE TRIGGER  sysload_consolidator
 AFTER INSERT ON sysload
 FOR EACH ROW
 BEGIN
-  set @window = 5;
+  select window_size into @window from table_info where table_name = 'sysload_daily';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -110,7 +110,7 @@ CREATE TRIGGER  sysload_daily_consolidator
 AFTER INSERT ON sysload_daily
 FOR EACH ROW
 BEGIN
-  set @window = 30;
+  select window_size into @window from table_info where table_name = 'sysload_weekly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -134,7 +134,7 @@ CREATE TRIGGER  sysload_weekly_consolidator
 AFTER INSERT ON sysload_weekly
 FOR EACH ROW
 BEGIN
-  set @window = 120;
+  select window_size into @window from table_info where table_name = 'sysload_monthly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;

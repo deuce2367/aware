@@ -15,10 +15,10 @@ CREATE TRIGGER  sensor_reading_insert
 BEFORE INSERT ON sensor_reading
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sensor_reading';
   IF NEW.id = 0 THEN
     INSERT into sensor_reading_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sensor_reading_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -33,10 +33,10 @@ CREATE TRIGGER  sensor_reading_daily_insert
 BEFORE INSERT ON sensor_reading_daily
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sensor_reading_daily';
   IF NEW.id = 0 THEN
     INSERT into sensor_reading_daily_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sensor_reading_daily_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -51,10 +51,10 @@ CREATE TRIGGER  sensor_reading_weekly_insert
 BEFORE INSERT ON sensor_reading_weekly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sensor_reading_weekly';
   IF NEW.id = 0 THEN
     INSERT into sensor_reading_weekly_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sensor_reading_weekly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -69,10 +69,10 @@ CREATE TRIGGER  sensor_reading_monthly_insert
 BEFORE INSERT ON sensor_reading_monthly
 FOR EACH ROW
 BEGIN
-  SET @rows = 5000000;
+  select table_rows into @rows from table_info where table_name = 'sensor_reading_monthly';
   IF NEW.id = 0 THEN
     INSERT into sensor_reading_monthly_rrd_key VALUES(0);
-    select LAST_INSERT_ID() % @rows into @rrd_key;
+    select LAST_INSERT_ID() % @rows + 1 into @rrd_key;
     DELETE FROM sensor_reading_monthly_rrd_key;
     SET NEW.id = @rrd_key;
   END IF;
@@ -91,7 +91,7 @@ CREATE TRIGGER  sensor_reading_consolidator
 AFTER INSERT ON sensor_reading
 FOR EACH ROW
 BEGIN
-  set @window = 5;
+  select window_size into @window from table_info where table_name = 'sensor_reading_daily';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -113,7 +113,7 @@ CREATE TRIGGER  sensor_reading_daily_consolidator
 AFTER INSERT ON sensor_reading_daily
 FOR EACH ROW
 BEGIN
-  set @window = 180;
+  select window_size into @window from table_info where table_name = 'sensor_reading_weekly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;
@@ -135,7 +135,7 @@ CREATE TRIGGER  sensor_reading_weekly_consolidator
 AFTER INSERT ON sensor_reading_weekly
 FOR EACH ROW
 BEGIN
-  set @window = 180;
+  select window_size into @window from table_info where table_name = 'sensor_reading_monthly';
   set @windowID = 0;
   select from_unixtime(unix_timestamp(NEW.updated) - unix_timestamp(NEW.updated) % (@window * 60)) into @windowStart;
   select from_unixtime(unix_timestamp(NEW.updated) + @window*60 - (unix_timestamp(NEW.updated) % (@window * 60))) into @windowStop;

@@ -75,6 +75,7 @@ CREATE TABLE nic (
   hostid               smallint(6) NOT NULL default 0,
   updated              timestamp NOT NULL default CURRENT_TIMESTAMP on update CURRENT_TIMESTAMP,
   device               varchar(8) NOT NULL default '',
+  speed                mediumint unsigned not NULL default 0,
   vlan                 smallint unsigned NOT NULL default 0,
   macaddr              varchar(17) default NULL,
   ipaddr               varchar(15) default NULL,

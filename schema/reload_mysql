@@ -41,6 +41,7 @@ system("mysqladmin -u $dba_user $dba_pass -h $host -f create $dbname");
 # -- create the tables
 print " - Creating Tables in $dbname\n";
 system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/tables.sql");
+system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/table_info.sql");
 
 print " - Loading RRD Tables in $dbname\n";
 system("mysql -u $dba_user $dba_pass -h $host $dbname < $FindBin::Bin/sysload.sql");
