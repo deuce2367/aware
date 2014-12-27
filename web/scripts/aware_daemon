@@ -647,18 +647,19 @@ until ($time_to_die) {
             my $tx = $txBytes[$i] || 0;
             my $rx = $rxBytes[$i] || 0;
 
-            if (($tx + $rx) < 10) {
+            if (($tx + $rx) < 10 || $device eq "lo") {
                 # -- don't database if there was very little or no traffic 
                 next;
             }
 
             if (!$vlan) { $vlan = 0; }
-            add_network_device($hostid, $device, $vlan);
+            my $speed = get_network_speed($device);
+            add_network_device($hostid, $device, $speed, $vlan);
 
-            print_log(" - network stats for $device/$vlan: $tx byte(s) TX, $rx byte(s) RX", 2);
+            print_log(" - network stats for $device/$speed/$vlan: $tx byte(s) TX, $rx byte(s) RX", 2);
             if ($nicSamples) { $sql .= ",\n"; }
             $sql .= "($hostid, '$device', $vlan, '$UPDATED', $tx, $rx)";
-            $xmlDoc->startTag('interface', 'device' => $device, 'vlan' => $vlan, 'txKb' => $tx, 'rxKb' => $rx);
+            $xmlDoc->startTag('interface', 'device' => $device, 'speed' => $speed, 'vlan' => $vlan, 'txKb' => $tx, 'rxKb' => $rx);
             $xmlDoc->endTag();
             $nicSamples++;
     
@@ -995,7 +996,7 @@ sub get_network_stats {
 
 sub add_network_device {
 
-    my ($hostid, $device, $vlan) = @_;
+    my ($hostid, $device, $speed, $vlan) = @_;
 
     my $deviceName = $device;
     if ($vlan) { $deviceName = "$device.$vlan"; }
@@ -1024,12 +1025,92 @@ sub add_network_device {
         chomp($netmask);
      }
 
-    my $sql = "replace delayed into nic (hostid, device, vlan, updated, macaddr, ipaddr, netmask) 
-                values ($hostid, '$device', $vlan, '$UPDATED', '$macaddr', '$ipaddr', '$netmask')";
+    my $sql = "replace delayed into nic (hostid, device, speed, vlan, updated, macaddr, ipaddr, netmask) 
+                values ($hostid, '$device', $speed, $vlan, '$UPDATED', '$macaddr', '$ipaddr', '$netmask')";
     $dbh->do($sql) || print_log("SQL ERROR ($sql): " . $dbh->errstr, 0);
     print_log($sql, 2);
 }
 
+sub get_bond_hash {
+    my ($bondFile) = @_;
+
+    my %hash;
+    open(IN, "<$bondFile");
+    while(<IN>) {
+        chomp($_);
+        if ($_ !~ m/:/) { next; }
+        $_ =~ s/^\s+//g;
+        my ($key, $value) = split(/:\s+/, $_);
+        my $counter = 1;
+        if (defined($hash{$key})) {
+            while (defined($hash{"$key-$counter"})) { $counter = $counter + 1; }
+            $hash{"$key-$counter"} = $value;
+        } else {
+            $hash{$key} = $value;
+        }
+    }
+    close(IN);
+    return %hash;
+}
+
+sub get_network_speed {
+    my ($device) = @_;
+
+    # -- try and obtain device speed
+    my $speed = 0;
+
+    if ($device =~ m/^bond/ && -f "/proc/net/bonding/$device") {
+        print_log("Found Bonded Interface ($device)", 1);
+
+        # -- this appears to be a bonded interface
+        my %hash = get_bond_hash("/proc/net/bonding/$device");
+        print_log(" interface ($device) using: $hash{'Bonding Mode'}", 1);
+        if ($hash{'Bonding Mode'} =~ m/link aggregation/) {
+            if ($hash{'MII Status'} eq "up") {
+                my $thisSpeed = $hash{'Speed'};
+                $thisSpeed =~ s/\s.*$//g;
+                $speed += $thisSpeed;
+            }
+            my $counter = 1;
+            while(defined($hash{"MII Status-$counter"})) {
+                if ($hash{'MII Status'} eq "up") {
+                    my $thisSpeed = $hash{"Speed-$counter"};
+                    $thisSpeed =~ s/\s.*$//g;
+                    $speed += $thisSpeed;
+                }
+            $counter++;
+            }
+            print_log(" * totallink aggregation speed: $speed", 1);
+        } elsif ($hash{'Bonding Mode'} =~ m/active-backup/) {
+            if ($hash{'Slave Interface'} eq $hash{'Currently Active Slave'}) {
+                my $thisSpeed = $hash{"Speed"};
+                $thisSpeed =~ s/\s.*$//g;
+                $speed += $thisSpeed;
+            } else {
+                my $counter = 1;
+                while (defined($hash{"Slave Interface-$counter"})) {
+                    if ($hash{"Slave Interface-$counter"} eq $hash{'Currently Active Slave'}) {
+                        my $thisSpeed = $hash{"Speed-$counter"};
+                        $thisSpeed =~ s/\s.*$//g;
+                        $speed += $thisSpeed;
+                        last;
+                    }
+                    $counter++;
+                }
+            }
+            print_log(" * effective active-backup speed: $speed", 1);
+        }
+    } elsif (-x "/usr/sbin/ethtool") {
+        my $ethtool = `/usr/sbin/ethtool $device | grep Speed:`;
+        print_log("ETH CMD RESULT($device): $ethtool", 2);
+        chomp($eththool);
+        $speed = $ethtool;
+        $speed =~ s/.*Speed: //g;
+        $speed =~ s/[a-zA-Z\/ :\(\)]*//g;
+        chomp($speed);
+    }
+    return $speed;
+}
 
 
 sub get_disk_stats {

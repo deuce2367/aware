@@ -36,8 +36,8 @@ my $cgi = new CGI();
 my $t0 = [gettimeofday];
 my $queries = 0;
 
-my $_title = "Node Disk I/O";
-my $_name = "node_diskio.cgi";
+my $_title = "Node Information";
+my $_name = "node_pane.cgi";
 
 my $hostid = $cgi->param('hostid') || 0;
 my $archive = $cgi->param('archive') || 0;
@@ -129,44 +129,40 @@ sub main {
     # -- plot the appropriate subsystems
     if ($tab eq "summary" || $all) {
         push(@plots, graph_sysload($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
-        print "<!-- PLOTTED $plots[$#plots] -->\n";
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=sysload' alt='Could Not Create Graph'/>");
     }
 
 
     if ($tab eq "memory" || $all) {
-
-        push(@plots, graph_memory($dbh, $hostid, $x, $y, $endTime, $window, \$queries, $image)); 
-        print "<!-- PLOTTED $plots[$#plots] -->\n";
-        push(@plots, graph_shmemory($dbh, $hostid, $x, $y, $endTime, $window, \$queries, $image)); 
-        print "<!-- PLOTTED $plots[$#plots] -->\n";
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=memory' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=shmemory' alt='Could Not Create Graph'/>");
     }
 
 
     if ($tab eq "utilization" || $all) {
-        push(@plots, graph_cpuload($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
-        print "<!-- PLOTTED $plots[$#plots] -->\n";
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=cpuload' alt='Could Not Create Graph'/>");
 
         my $sql = "select distinct(device) from diskload where hostid = $hostid and updated > now() - 60*60 and device not like '/dev/md%' order by device";
         my $sth = $dbh -> prepare($sql) || die "Error occurred preparing SQL: " . $dbh->errstr;
         $sth -> execute || die "Error occurred processing SQL: " . $dbh->errstr; $queries++;
         while (my @row = $sth->fetchrow()) {
             my $device = $row[0];
-            push(@plots, graph_device_utilization($dbh, $hostid, $device, $x, $y, $endTime, $window, \$queries, $image)); 
+            push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=disk_utilization&device=$device' alt='Could Not Create Graph'/>");
         }
     } 
 
 
     if ($tab eq "diskio" || $all) {
 
-        push(@plots, graph_sysio($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
-        push(@plots, graph_diskload($dbh, $hostid, $x, $y, $endTime, $window, \$queries, $image)); 
-        push(@plots, graph_device_svctimes($dbh, $hostid, $x, $y * 1.5, $endTime, $window, \$queries, $image)); 
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=sysio' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=diskload' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=svctime' alt='Could Not Create Graph'/>");
     } 
 
 
     if ($tab eq "network" || $all) {
-        push(@plots, graph_netload($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
-        push(@plots, graph_network_combined($dbh, $hostid, $x, $y, $endTime, $window, \$queries, $image)); 
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=netload' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=network' alt='Could Not Create Graph'/>");
 
         my $sql = "select device, vlan from nic where hostid = $hostid order by device, vlan";
         my $sth = $dbh -> prepare($sql) || die "Error occurred preparing SQL: " . $dbh->errstr;
@@ -174,20 +170,20 @@ sub main {
         while (my @row = $sth->fetchrow()) {
             my $device = $row[0];
             my $vlan = $row[1];
-            push(@plots, graph_network_device($dbh, $hostid, $device, $vlan, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
+            push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=network_device&device=$device&vlan=$vlan' alt='Could Not Create Graph'/>");
         }
     } 
 
 
     if ($tab eq "procs" || $all) {
-        push(@plots, graph_procs($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image)); 
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=procs' alt='Could Not Create Graph'/>");
     } 
 
 
     if ($tab eq "temperature" || $all) {
-        push(@plots, graph_temperature($dbh, $hostid, $x, $y, $endTime, $window, $cpucount, \$queries, $image)); 
-        push(@plots, graph_power($dbh, $hostid, $x, $y, $endTime, $window, $cpucount, \$queries, $image)); 
-        push(@plots, graph_fans($dbh, $hostid, $x, $y, $endTime, $window, $cpucount, \$queries, $image)); 
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=temperature' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=power' alt='Could Not Create Graph'/>");
+        push(@plots, "<img src='create_graph.cgi?hostid=$hostid&window=$window&daysAgo=$daysAgo&graph=fans' alt='Could Not Create Graph'/>");
     } 
     
 
@@ -248,13 +244,15 @@ sub main {
         print "<th class=label colspan=3>Profile:</th><td class=lcell colspan=3>";
         #print "<a href=profile_status.cgi?profile_id=$profile_id>$profile</a></td></tr>\n";
         print "$profile</td>";
-        print "<th class=label colspan=2>Hostid:</th><td class=lcell colspan=2>$serial</td>\n";
+        print "<th class=label colspan=2>Aware Hostid:</th><td class=lcell colspan=2>$serial</td>\n";
         print "</tr>\n";
     
         print "<tr class=odd>";
         print "<th class=label colspan=2>Kernel:</th><td class=lcell colspan=2>$os</td>\n";
-        print "<th class=label colspan=3>IP Address:</th><td class=lcell colspan=3>$ipaddr</td>\n";
-        print "<th class=label colspan=2>MAC Address:</th><td class=lcell colspan=2>$macaddr</td>\n";
+        #print "<th class=label colspan=3>IP Address:</th><td class=lcell colspan=3>$ipaddr</td>\n";
+        #print "<th class=label colspan=2>MAC Address:</th><td class=lcell colspan=2>$macaddr</td>\n";
+        print "<th class=label colspan=3>Memory Usage:</th><td class=lcell colspan=3>$memload</td>\n";
+        print "<th class=label colspan=2>Temperature:</th><td class=lcell colspan=2>$temperature&deg; C</td>\n";
         print "</tr>\n";
     
         print "<tr class=even>";
@@ -270,16 +268,14 @@ sub main {
         print "<a onClick=\"openWin('popup', 1024, 700);\" href=process.cgi?hostid=$hostid&popup=1 target=popup>$procs</a></td>\n";
         print "</tr>\n";
     
-        print "<tr class=even>";
-        print "<th class=label colspan=2>Memory Usage:</th><td class=lcell colspan=2>$memload\%</td>\n";
-        print "<th class=label colspan=3>Temperature:</th><td class=lcell colspan=3>$temperature&deg; C</td>\n";
-        print "<th class=label colspan=2>Ping Status:</th><td class=lcell colspan=2>$ping</td>\n";
-        print "</tr>\n";
+        #print "<tr class=even>";
+        #print "<th class=label colspan=2>Ping Status:</th><td class=lcell colspan=2>$ping</td>\n";
+        #print "</tr>\n";
 
-        print "<tr><th colspan=14 class=header>Filesystem Summary</th></tr>\n";
+        print "<tr><th colspan=\"100%\" class=header>Filesystem Summary</th></tr>\n";
         filesystem_summary();
     
-        print "<tr><th colspan=14 class=header>System Plots</th></tr>\n";
+        print "<tr><th colspan=\"100%\" class=header>System Plots</th></tr>\n";
     
         $sth->finish();
 
@@ -430,19 +426,19 @@ sub filesystem_summary {
         my @irow = $isth->fetchrow();
         my $alerts = $irow[0] || 0;
     
-        print "<tr>";
-        print "<th class=label>Device</th>";
-        print "<th class=label>Partition</th>";
-        print "<th class=label>Format</th>";
-        print "<th class=label>Mount</th>";
-        print "<th class=label colspan=2>Blocks</th>";
-        print "<th class=label colspan=2>Inodes</th>";
-        print "<th class=label>Total Blocks</th>";
-        print "<th class=label>Blocks Used</th>";
-        print "<th class=label>Blocks Free</th>";
-        print "<th class=label>Total Inodes</th>";
-        print "<th class=label>Inodes Used</th>";
-        print "<th class=label>Inodes Free</th>";
+        print "<tr class='rowheader'>";
+        print "<th>Device</th>";
+        print "<th>Partition</th>";
+        print "<th>Format</th>";
+        print "<th>Mount</th>";
+        print "<th colspan=2>Blocks</th>";
+        print "<th colspan=2>Inodes</th>";
+        print "<th>Total Blocks</th>";
+        print "<th>Blocks Used</th>";
+        print "<th>Blocks Free</th>";
+        print "<th>Total Inodes</th>";
+        print "<th>Inodes Used</th>";
+        print "<th>Inodes Free</th>";
         print "</tr>\n";
         $isth = $dbh->prepare("select mount, free, ifree, type, device, partition, pct, ipct from filesystem where hostid = $hostid order by device, partition");
         $isth->execute(); $queries++;
@@ -510,5 +506,53 @@ sub filesystem_summary {
             print "</tr>\n";
         }
         $sth->finish();
+
+}
+
+sub network_interfaces {
+
+    my $sql = "select device, speed, vlan, macaddr, ipaddr, netmask from nic where hostid = '$hostid' order by device";
+
+    my $sth = $dbh->prepare($sql) || die "Error occurred preparing SQL: " . $dbh->errstr;
+    $sth->execute() || die "Error occurred processing SQL: " . $dbh->errstr; $queries++;
+
+    my $rowcount = 0;
+    while(my @row = $sth->fetchrow()) {
+
+        my $device = $row[0];
+        my $speed = $row[1];
+        my $vlan = $row[2];
+        my $macaddr = $row[3];
+        my $ipaddr = $row[4];
+        my $netmask = $row[5];
+        
+        my $type = "PRIMARY";
+        if ($vlan) { $device = "$device:$vlan"; $type = "VLAN"; }
+
+        if ($rowcount) {
+            print "<tr class=rowheader>";
+            print "<th colspan=2>Device</th>";
+            print "<th colspan=1>Type</th>";
+            print "<th colspan=1>Speed</th>";
+            print "<th colspan=4>MACADDR</th>";
+            print "<th colspan=3>IP Address</th>";
+            print "<th colspan=3>Netmask</th>";
+            print "</tr>";
+        }
+
+        my $class = get_row_type($rowcount);
+        print "<tr class=$class>";
+        print "<td class=cell colspan=2>$device</td>\n";
+        print "<td class=cell colspan=1>$type</td>\n";
+        print "<td class=cell colspan=1>$speed</td>\n";
+        print "<td class=cell colspan=4>$macaddr</td>\n";
+        print "<td class=cell colspan=3>$ipaddr</td>\n";
+        print "<td class=cell colspan=3>$netmask</td>\n";
+        print "</tr>\n";
+
+        $rowcount++;
+
+    }
+    $sth->finish();
 
 }

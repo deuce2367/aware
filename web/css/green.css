@@ -175,9 +175,10 @@ td { text-align: center; vertical-align: top; }
 	padding-left: 15px; padding-right: 15px; padding-bottom: 2px; border-bottom: 1px solid #ddcc00;
 }
 
-.label { text-align: right; background-color: #555; color:#ddd; padding-left: 5px; padding-right: 5px; } 
+.label { text-align: right; background-color: #909090; color:#fff; padding-left: 5px; padding-right: 5px; } 
 #mainsection .header { text-align: center; background-color: #aaa; color: #fff; padding-left: 5px; padding-right: 5px; border: 1px solid #919191; }
 .header { text-align: center; background-color: #aaa; color: #fff; padding-left: 5px; padding-right: 5px; border: 1px solid #919191; background-image: url("../images/gray_bar.png"); }
+.rowheader { text-align: center; background-color: #909090; color: #fff; padding-left: 5px; padding-right: 5px; border: 1px solid #919191; background-image: url("../images/gray_bar.png"); }
 #popup  .header { text-align: center; background-color: #879a87; color:#fff; padding-left: 5px; padding-right: 5px; border: 1px solid #898; background-image: url("../images/gray_bar.png"); }
 .footer {  text-align: center; background-color: #222; color:#ccc; padding-left: 5px; 
 	padding-right: 5px; border: 1px solid #ccc; }
