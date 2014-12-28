@@ -75,35 +75,33 @@ sub main {
     my $cpucount = $row[1];
     my $profile = $row[2];
     $sth->finish();
-    print "<table>\n";
-    print "<tr><th colspan=14 class=tableheader>$hostname</th></tr>\n";
 
-    my $endTime = unix_timestamp(get_date()) - ($daysAgo * 86400);
+    my $endtime = unix_timestamp(get_date()) - ($daysAgo * 86400);
     my $image = "images/tmp/$hostname";
     if ($graph eq "sysload") {
-        $imgfile = graph_sysload($dbh, $hostid, "Host", $x, $y, $endTime, $window, \$queries, $image);
+        $imgfile = graph_sysload($dbh, $hostid, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "memory") {
         $imgfile = graph_memory($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "shmemory") {
         $imgfile = graph_shmemory($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "cpuload") {
-        $imgfile = graph_cpuload($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
+        $imgfile = graph_cpuload($dbh, $hostid, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "disk_utilization" && $device) {
         $imgfile = graph_device_utilization($dbh, $hostid, $device, $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "sysio") {
-        $imgfile = graph_sysio($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
+        $imgfile = graph_sysio($dbh, $hostid, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "diskload") {
         $imgfile = graph_diskload($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "svctime") {
         $imgfile = graph_device_svctimes($dbh, $hostid, $x, $y * 1.5, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "netload") {
-        $imgfile = graph_netload($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
+        $imgfile = graph_netload($dbh, $hostid, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "network") {
         $imgfile = graph_network_combined($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "network_device" && $device && defined($vlan)) {
-        $imgfile = graph_network_device($dbh, $hostid, $device, $vlan, $x, $y, $endtime, $window, \$queries, $image);
+        $imgfile = graph_network_device($dbh, $hostid, $device, $vlan, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "procs") {
-        $imgfile = graph_procs($dbh, $hostid, $x, $y, $endtime, $window, \$queries, $image);
+        $imgfile = graph_procs($dbh, $hostid, "Host", $x, $y, $endtime, $window, \$queries, $image);
     } elsif ($graph eq "temperature") {
         $imgfile = graph_temperature($dbh, $hostid, $x, $y, $endtime, $window, $cpucount, \$queries, $image);
     } elsif ($graph eq "power") {
@@ -130,7 +128,7 @@ sub errorResponse {
     print "\n";
     open(IN, "<$errorImageFile");
     binmode(IN);
-    while(<IN>) print $_;
+    while(<IN>) { print $_ ; }
     close(IN);
 }
 
@@ -144,7 +142,7 @@ sub imageResponse {
     print "\n";
     open(IN, "<$image");
     binmode(IN);
-    while(<IN>) print $_;
+    while(<IN>) { print $_; }
     close(IN);
 
 }

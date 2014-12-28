@@ -8,7 +8,7 @@ CREATE TABLE table_info (
   table_name    varchar(64) NOT NULL,
   table_rows    int(10) unsigned NOT NULL default '5000000',
   window_size   int(10) unsigned NOT NULL default '0',
-  PRIMARY KEY (table_name),
+  PRIMARY KEY (table_name)
 ) ENGINE=MyISAM DEFAULT CHARSET=latin1;
 
 LOCK TABLES table_info WRITE;
