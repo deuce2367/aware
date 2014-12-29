@@ -1,0 +1,17 @@
+#!/bin/env bash
+#
+# Makefile for RPM
+
+TARGET=`pwd | xargs basename`
+TOPDIR=`mktemp -d /tmp/make_${TARGET}_XXXXXX`
+VERSION=`git tag -l 'v[0-9].[0-9]*' | sort -r | head -1`
+REV=`git rev-list HEAD | wc -l`
+BRANCH=`git branch --no-abbrev | awk '{if ($1 == "*" ) { print $2 } }'`
+HASH=`git rev-list --no-abbrev --max-count=1 --date-order --remove-empty --all`
+
+printf "Target:          %40s\n" $TARGET
+printf "Top Directory:   %40s\n" $TOPDIR
+printf "Tag:             %40s\n" $VERSION
+printf "Rev:             %40s\n" $REV
+printf "Branch:          %40s\n" $BRANCH
+printf "Hash:            %40s\n" $HASH
