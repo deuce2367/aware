@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 #
 # Makefile for RPM
 
@@ -9,12 +9,12 @@ RELEASE=`git rev-list HEAD | wc -l`
 BRANCH=`git branch --no-abbrev | awk '{if ($1 == "*" ) { print $2 } }'`
 HASH=`git rev-list --no-abbrev --max-count=1 --date-order --remove-empty --all`
 
-printf "Target:          %40s\n" $TARGET
-printf "Top Directory:   %40s\n" $TOPDIR
-printf "Tag:             %40s\n" $VERSION
-printf "Release:         %40s\n" $RELEASE
-printf "Branch:          %40s\n" $BRANCH
-printf "Hash:            %40s\n" $HASH
+printf "Target:          %50s\n" $TARGET
+printf "Top Directory:   %50s\n" $TOPDIR
+printf "Tag:             %50s\n" $VERSION
+printf "Release:         %50s\n" $RELEASE
+printf "Branch:          %50s\n" $BRANCH
+printf "Hash:            %50s\n" $HASH
 
 if [ ! -e RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm ] ; then
     mkdir -p ${TOPDIR}/BUILD ${TOPDIR}/RPMS ${TOPDIR}/SOURCES ${TOPDIR}/SPECS ${TOPDIR}/SRPMS ${TOPDIR}/SCRATCH
@@ -22,13 +22,15 @@ if [ ! -e RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm ] ; then
     sed -i 's/^Version:.*/Version:\t'${VERSION}'/g' ${TOPDIR}/SPECS/${TARGET}.spec
     sed -i 's/^Release:.*/Release:\t'${RELEASE}'/g' ${TOPDIR}/SPECS/${TARGET}.spec
     sed -i 's%^URL:.*%URL:\t'${BRANCH}'_'${VERSION}'-'${HASH}'%g' ${TOPDIR}/SPECS/${TARGET}.spec
-    git log --pretty-format:" * %at %cn %n - %s" | grep -v ^" --" | grep -B1 -- %" -" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TOPDIR}/SPECS/${TARGET}.spec
+    git log --pretty=format:" * %at %cn %n - %s" | grep -v ^" --" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TOPDIR}/SPECS/${TARGET}.spec
     find ${TOPDIR}/SRC \( -name '.svn' -o -name '*~' -o -name perl \) -prune -o -not -type d -print > ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
     tar -czf ${TOPDIR}/SOURCES/${TARGET}-${VERSION}.tar.gz --no-recursion --transform='s,.*/SRC/,'${TARGET}'-'${VERSION}'/,' -T ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
     rpmbuild -ba --define="_topdir ${TOPDIR}" ${TOPDIR}/SPECS/${TARGET}.spec
     mkdir -p SRPMS RPMS
     find ${TOPDIR}/SRPMS -type f -exec mv {} SRPMS/. \;
     find ${TOPDIR}/RPMS -type f -exec mv {} RPMS/. \;
+else 
+    printf "Found existing RPMS:       %40s\n" `ls RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm`
 fi
 
 
