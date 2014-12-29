@@ -1,17 +1,35 @@
-#!/bin/env bash
+#!/bin/bash -x
 #
 # Makefile for RPM
 
-TARGET=`pwd | xargs basename`
+TARGET=`pwd | xargs basename | xargs echo -n`
 TOPDIR=`mktemp -d /tmp/make_${TARGET}_XXXXXX`
 VERSION=`git tag -l 'v[0-9].[0-9]*' | sort -r | head -1`
-REV=`git rev-list HEAD | wc -l`
+RELEASE=`git rev-list HEAD | wc -l`
 BRANCH=`git branch --no-abbrev | awk '{if ($1 == "*" ) { print $2 } }'`
 HASH=`git rev-list --no-abbrev --max-count=1 --date-order --remove-empty --all`
 
 printf "Target:          %40s\n" $TARGET
 printf "Top Directory:   %40s\n" $TOPDIR
 printf "Tag:             %40s\n" $VERSION
-printf "Rev:             %40s\n" $REV
+printf "Release:         %40s\n" $RELEASE
 printf "Branch:          %40s\n" $BRANCH
 printf "Hash:            %40s\n" $HASH
+
+if [ ! -e RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm ] ; then
+    mkdir -p ${TOPDIR}/BUILD ${TOPDIR}/RPMS ${TOPDIR}/SOURCES ${TOPDIR}/SPECS ${TOPDIR}/SRPMS ${TOPDIR}/SCRATCH
+    git archive --format=tar HEAD | tar -xf - -C ${TOPDIR}
+    sed -i 's/^Version:.*/Version:\t'${VERSION}'/g' ${TOPDIR}/SPECS/${TARGET}.spec
+    sed -i 's/^Release:.*/Release:\t'${RELEASE}'/g' ${TOPDIR}/SPECS/${TARGET}.spec
+    sed -i 's%^URL:.*%URL:\t'${BRANCH}'_'${VERSION}'-'${HASH}'%g' ${TOPDIR}/SPECS/${TARGET}.spec
+    git log --pretty-format:" * %at %cn %n - %s" | grep -v ^" --" | grep -B1 -- %" -" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TOPDIR}/SPECS/${TARGET}.spec
+    find ${TOPDIR} \( -name '.svn' -o -name '*~' \) -prune -o -not -type d -print > ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
+    tar -czf ${TOPDIR}/SOURCES/${TARGET}-${VERSION}.tar.gz --no-recursion --transform='s,^'${TOPDIR}','${TARGET}'-'${VERSION}'/,' -T ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
+    rpmbuild -ba --define="_topdir ${TOPDIR}" ${TOPDIR}/SPECS/${TARGET}.spec
+    mkdir -p SRPMS RPMS
+    find ${TOPDIR}/SRPMS -type f -exec mv {} SRPMS/. \;
+    find ${TOPDIR}/RPMS -type f -exec mv {} RPMS/. \;
+fi
+
+
+
