@@ -23,8 +23,8 @@ if [ ! -e RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm ] ; then
     sed -i 's/^Release:.*/Release:\t'${RELEASE}'/g' ${TOPDIR}/SPECS/${TARGET}.spec
     sed -i 's%^URL:.*%URL:\t'${BRANCH}'_'${VERSION}'-'${HASH}'%g' ${TOPDIR}/SPECS/${TARGET}.spec
     git log --pretty-format:" * %at %cn %n - %s" | grep -v ^" --" | grep -B1 -- %" -" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TOPDIR}/SPECS/${TARGET}.spec
-    find ${TOPDIR} \( -name '.svn' -o -name '*~' \) -prune -o -not -type d -print > ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
-    tar -czf ${TOPDIR}/SOURCES/${TARGET}-${VERSION}.tar.gz --no-recursion --transform='s,^'${TOPDIR}','${TARGET}'-'${VERSION}'/,' -T ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
+    find ${TOPDIR}/SRC \( -name '.svn' -o -name '*~' -o -name perl \) -prune -o -not -type d -print > ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
+    tar -czf ${TOPDIR}/SOURCES/${TARGET}-${VERSION}.tar.gz --no-recursion --transform='s,.*/SRC/,'${TARGET}'-'${VERSION}'/,' -T ${TOPDIR}/SCRATCH/${TARGET}-${VERSION}.filelist
     rpmbuild -ba --define="_topdir ${TOPDIR}" ${TOPDIR}/SPECS/${TARGET}.spec
     mkdir -p SRPMS RPMS
     find ${TOPDIR}/SRPMS -type f -exec mv {} SRPMS/. \;
