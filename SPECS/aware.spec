@@ -74,7 +74,6 @@ The Aware client daemon
 /opt/aware/cfg
 /opt/aware/doc
 /opt/aware/logs
-/opt/aware/pids
 /opt/aware/schema
 /opt/aware/web
 /etc/httpd/conf.d/aware_httpd.conf
