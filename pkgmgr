@@ -1,24 +1,27 @@
-#!/bin/bash -x
+#!/bin/bash
 #
 # Makefile for RPM
 
-TARGETS="aware ZUtils-Common ZUtils-Aware"
+TARGETS="aware"
+BUNDLES="perl-ZUtils-Common perl-ZUtils-Aware perl-Bit-Vector perl-Carp-Clan perl-Date-Calc perl-GD perl-GD-Graph perl-GD-Graph3d perl-GD-Text-Util perl-XML-Writer"
 TOPDIR=`mktemp -d /tmp/make_XXXXXX`
 VERSION=`git tag -l 'v[0-9].[0-9]*' | sort -r | head -1`
 RELEASE=`git rev-list HEAD | wc -l`
 BRANCH=`git branch --no-abbrev | awk '{if ($1 == "*" ) { print $2 } }'`
 HASH=`git rev-list --no-abbrev --max-count=1 --date-order --remove-empty --all`
 
-printf "Targets:         %50s\n" $TARGETS
-printf "Top Directory:   %50s\n" $TOPDIR
-printf "Tag:             %50s\n" $VERSION
-printf "Release:         %50s\n" $RELEASE
-printf "Branch:          %50s\n" $BRANCH
-printf "Hash:            %50s\n" $HASH
+printf "Targets:              %s\n" $TARGETS
+printf "Top Directory:        %s\n" $TOPDIR
+printf "Tag:                  %s\n" $VERSION
+printf "Release:              %s\n" $RELEASE
+printf "Branch:               %s\n" $BRANCH
+printf "Hash:                 %s\n" $HASH
+
+mkdir -p SRPMS RPMS
 
 for TARGET in ${TARGETS}; do
     if [ ! -e RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm ] ; then
-        printf "Building package:          %40s\n" $TARGET
+        printf "Building package:     %s\n" $TARGET
         TBUILD=${TOPDIR}/$TARGET
         mkdir -p ${TBUILD}/BUILD ${TBUILD}/RPMS ${TBUILD}/SOURCES ${TBUILD}/SPECS ${TBUILD}/SRPMS ${TBUILD}/SCRATCH
         git archive --format=tar HEAD SRC/${TARGET} | tar -xf - --transform='s,SRC/'${TARGET}',,' -C ${TBUILD}
@@ -30,11 +33,29 @@ for TARGET in ${TARGETS}; do
         sed -i 's%^URL:.*%URL:\t'${BRANCH}'_'${VERSION}'-'${HASH}'%g' ${TBUILD}/SPECS/${TARGET}.spec
         git log --pretty=format:" * %at %cn %n - %s" | grep -v ^" --" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TBUILD}/SPECS/${TARGET}.spec
         rpmbuild -ba --define="_topdir ${TBUILD}" ${TBUILD}/SPECS/${TARGET}.spec
-        mkdir -p SRPMS RPMS
         find ${TBUILD}/SRPMS -type f -exec mv {} SRPMS/. \;
         find ${TBUILD}/RPMS -type f -exec mv {} RPMS/. \;
-        exit
     else 
-        printf "Found existing RPMS:       %40s\n" `ls RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm`
+        printf "Found existing RPMS:  %s\n" `ls RPMS/${TARGET}-${VERSION}-${RELEASE}.*.rpm`
+    fi
+done
+
+
+for BUNDLE in ${BUNDLES}; do
+    VERSION=`cat SPECS/${BUNDLE}.spec | grep "^Version:" | sed 's/.*:\s\+//g' | sed 's/\s\+//g'`
+    RELEASE=`cat SPECS/${BUNDLE}.spec | grep "^Release:" | sed 's/.*:\s\+//g' | sed 's/\s\+//g' | sed 's/%.*//g'`
+    if [ ! -e RPMS/${BUNDLE}-${VERSION}-${RELEASE}.*.rpm ] ; then
+        printf "Building package:     %s\n" $BUNDLE
+        TBUILD=${TOPDIR}/$BUNDLE
+        mkdir -p ${TBUILD}/BUILD ${TBUILD}/RPMS ${TBUILD}/SOURCES ${TBUILD}/SPECS ${TBUILD}/SRPMS ${TBUILD}/SCRATCH
+        git archive --format=tar HEAD SRC/${BUNDLE} | tar -xf - --transform='s,SRC/'${BUNDLE}',,' -C ${TBUILD}
+        find ${TBUILD}/ \( -name '.svn' -o -name '*~' -o -name ${BUNDLE}-${VERSION}.filelist \) -prune -o -not -type d -print > ${TBUILD}/SCRATCH/${BUNDLE}-${VERSION}.filelist
+        tar -czf ${TBUILD}/SOURCES/${BUNDLE}-${VERSION}.tar.gz --no-recursion --transform='s,.'.*${BUNDLE}'/,'${BUNDLE}'-'${VERSION}'/,' -T ${TBUILD}/SCRATCH/${BUNDLE}-${VERSION}.filelist
+        git archive --format=tar HEAD SPECS/${BUNDLE}.spec | tar -xf - -C ${TBUILD}
+        rpmbuild -ba --define="_topdir ${TBUILD}" ${TBUILD}/SPECS/${BUNDLE}.spec
+        find ${TBUILD}/SRPMS -type f -exec mv {} SRPMS/. \;
+        find ${TBUILD}/RPMS -type f -exec mv {} RPMS/. \;
+    else 
+        printf "Found existing RPMS:  %s\n" `ls RPMS/${BUNDLE}-${VERSION}-${RELEASE}.*.rpm`
     fi
 done
