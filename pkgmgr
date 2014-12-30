@@ -22,12 +22,13 @@ for TARGET in ${TARGETS}; do
         TBUILD=${TOPDIR}/$TARGET
         mkdir -p ${TBUILD}/BUILD ${TBUILD}/RPMS ${TBUILD}/SOURCES ${TBUILD}/SPECS ${TBUILD}/SRPMS ${TBUILD}/SCRATCH
         git archive --format=tar HEAD SRC/${TARGET} | tar -xf - --transform='s,SRC/'${TARGET}',,' -C ${TBUILD}
+        find ${TBUILD}/ \( -name '.svn' -o -name '*~' -o -name ${TARGET}-${VERSION}.filelist \) -prune -o -not -type d -print > ${TBUILD}/SCRATCH/${TARGET}-${VERSION}.filelist
+        tar -czf ${TBUILD}/SOURCES/${TARGET}-${VERSION}.tar.gz --no-recursion --transform='s,.'.*${TARGET}'/,'${TARGET}'-'${VERSION}'/,' -T ${TBUILD}/SCRATCH/${TARGET}-${VERSION}.filelist
+        git archive --format=tar HEAD SPECS/${TARGET}.spec | tar -xf - -C ${TBUILD}
         sed -i 's/^Version:.*/Version:\t'${VERSION}'/g' ${TBUILD}/SPECS/${TARGET}.spec
         sed -i 's/^Release:.*/Release:\t'${RELEASE}'/g' ${TBUILD}/SPECS/${TARGET}.spec
         sed -i 's%^URL:.*%URL:\t'${BRANCH}'_'${VERSION}'-'${HASH}'%g' ${TBUILD}/SPECS/${TARGET}.spec
         git log --pretty=format:" * %at %cn %n - %s" | grep -v ^" --" | grep -v -- -- | awk '{ if ($1 == "*") { print " * " strftime("%a %b %d %Y",$2) " " $3 } else { print $0}}' >> ${TBUILD}/SPECS/${TARGET}.spec
-        find ${TBUILD}/SRC/${TARGET} \( -name '.svn' -o -name '*~' \) -prune -o -not -type d -print > ${TBUILD}/SCRATCH/${TARGET}-${VERSION}.filelist
-        tar -czf ${TBUILD}/SOURCES/${TARGET}-${VERSION}.tar.gz --remove-files --no-recursion --transform='s,.*/SRC/'${TARGET}','${TARGET}'-'${VERSION}'/,' -T ${TBUILD}/SCRATCH/${TARGET}-${VERSION}.filelist
         rpmbuild -ba --define="_topdir ${TBUILD}" ${TBUILD}/SPECS/${TARGET}.spec
         mkdir -p SRPMS RPMS
         find ${TBUILD}/SRPMS -type f -exec mv {} SRPMS/. \;
