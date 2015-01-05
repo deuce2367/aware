@@ -15,7 +15,7 @@ Requires: perl-ZUtils-Common >= 1.44
 Requires: perl-ZUtils-Aware >= 1.32
 Requires: mysql-server httpd perl(GD) perl(GD::Graph) perl(GD::Graph3d) perl(GD::Text)
 Requires: perl(Date::Calc) perl(Bit::Vector)
-Requires: perl(Time::HiRes);
+Requires: perl(Time::HiRes)
 Requires(post): /sbin/chkconfig
 Requires(preun): /sbin/chkconfig /sbin/service
 Requires(postun): /sbin/service sed
